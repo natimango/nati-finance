@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Control - NATI Accounting</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/theme.css">
+</head>
+<body class="nati-page bg-gradient-to-br from-slate-50 via-slate-100 to-white text-slate-900">
+    <div class="min-h-screen flex flex-col">
+        <header class="nati-hero bg-gradient-to-r from-indigo-700 via-blue-700 to-slate-900 text-white shadow">
+            <div class="max-w-6xl mx-auto px-4 sm:px-6 py-5 flex flex-wrap items-center gap-4 justify-between">
+                <div class="flex items-center gap-3">
+                    <a href="index.html" class="block">
+                        <img src="logo.jpg" alt="NATI logo" class="h-16 w-16 rounded-2xl border border-white/40 bg-white object-cover shadow">
+                    </a>
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.2em] text-white/70">Admin control</p>
+                        <h1 class="text-2xl font-semibold">Team access & budgets</h1>
+                    </div>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div class="nati-nav-wrapper">
+                        <button class="nati-nav-toggle" onclick="toggleNav('nav-admin-page')"><i class="fas fa-bars"></i><span>Menu</span></button>
+                        <nav class="nati-nav" id="nav-admin-page">
+                            <a href="index.html" class="nati-nav-link"><i class="fas fa-gauge"></i><span>Dashboard</span></a>
+                            <a href="documents.html" class="nati-nav-link"><i class="fas fa-folder-open"></i><span>Documents</span></a>
+                            <a href="upload.html" class="nati-nav-link"><i class="fas fa-upload"></i><span>Upload</span></a>
+                            <a href="drop.html" class="nati-nav-link"><i class="fas fa-layer-group"></i><span>Drop</span></a>
+                            <a href="reports.html" class="nati-nav-link"><i class="fas fa-chart-line"></i><span>Reports</span></a>
+                            <a href="admin.html" class="nati-nav-link is-active" id="nav-admin"><i class="fas fa-user-shield"></i><span>Admin</span></a>
+                        </nav>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <div id="user-pill" class="hidden sm:flex items-center gap-2 px-3 py-2 rounded-2xl border border-white/30 bg-white/10 backdrop-blur">
+                            <div>
+                                <p id="user-name" class="text-sm font-semibold leading-tight">—</p>
+                                <p id="user-role" class="text-[11px] tracking-[0.2em] text-white/70 uppercase">—</p>
+                            </div>
+                        </div>
+                        <button id="logout-btn" class="hidden px-3 py-2 bg-white/15 hover:bg-white/25 text-sm font-semibold rounded-2xl flex items-center gap-2 transition">
+                            <i class="fas fa-sign-out-alt"></i>
+                            <span>Logout</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <main class="flex-1 max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+            <section class="nati-card bg-white/90 border border-slate-200 rounded-2xl shadow p-6 space-y-4">
+                <div class="flex items-start justify-between gap-4 flex-wrap">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.2em] text-slate-500">User directory</p>
+                        <h2 class="text-2xl font-semibold text-slate-900">Team access overview</h2>
+                        <p class="text-sm text-slate-500 mt-1">Uploaders can remove only their bills, managers control the queue, admins get budget + ingestion controls.</p>
+                    </div>
+                    <div class="text-sm text-slate-500">
+                        <p>Roles:</p>
+                        <p><span class="font-semibold text-slate-900">Uploader</span> – upload & delete own bills</p>
+                        <p><span class="font-semibold text-slate-900">Manager</span> – upload & delete any bill, manual overrides</p>
+                        <p><span class="font-semibold text-slate-900">Admin</span> – everything + budgets/ingest</p>
+                    </div>
+                </div>
+                <div class="overflow-auto border border-slate-100 rounded-2xl">
+                    <table class="nati-table text-sm min-w-full">
+                        <thead>
+                            <tr>
+                                <th>User</th>
+                                <th>Role</th>
+                                <th>Created</th>
+                                <th>Last login</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="users-table-body">
+                            <tr>
+                                <td colspan="4" class="px-4 py-6 text-center text-slate-500 text-sm">Loading users…</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="nati-card bg-white border border-slate-200 rounded-2xl shadow p-6 space-y-4">
+                <div>
+                    <p class="text-xs uppercase tracking-[0.2em] text-slate-500">Create user</p>
+                    <h2 class="text-2xl font-semibold text-slate-900">Issue credentials</h2>
+                    <p class="text-sm text-slate-500">Passwords are stored securely; share them over a secure channel.</p>
+                </div>
+                <form id="create-user-form" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="sm:col-span-1">
+                        <label class="block text-xs font-semibold text-slate-600 mb-1">Full name</label>
+                        <input type="text" id="new-user-name" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="Finance Ops" autocomplete="off">
+                    </div>
+                    <div class="sm:col-span-1">
+                        <label class="block text-xs font-semibold text-slate-600 mb-1">Email *</label>
+                        <input type="email" id="new-user-email" required class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="team@nati.in" autocomplete="off">
+                    </div>
+                    <div class="sm:col-span-1">
+                        <label class="block text-xs font-semibold text-slate-600 mb-1">Password *</label>
+                        <input type="password" id="new-user-password" required class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm" placeholder="Temporary password" autocomplete="new-password">
+                    </div>
+                    <div class="sm:col-span-1">
+                        <label class="block text-xs font-semibold text-slate-600 mb-1">Role *</label>
+                        <select id="new-user-role" required class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                            <option value="uploader">Uploader – upload/delete own</option>
+                            <option value="manager">Manager – upload/delete any, manual</option>
+                            <option value="admin">Admin – everything</option>
+                        </select>
+                    </div>
+                    <div class="sm:col-span-2 flex items-center justify-between">
+                        <p id="create-user-message" class="text-sm text-slate-500"></p>
+                        <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 flex items-center gap-2">
+                            <i class="fas fa-user-plus"></i>
+                            <span>Create user</span>
+                        </button>
+                    </div>
+                </form>
+            </section>
+        </main>
+    </div>
+    <script src="js/session.js" defer></script>
+    <script src="js/nav.js" defer></script>
+    <script src="js/admin.js" defer></script>
+</body>
+</html>

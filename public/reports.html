@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reports - NATI Accounting</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/theme.css">
+</head>
+<body class="nati-page bg-gradient-to-br from-slate-50 via-slate-100 to-white text-slate-900">
+    <div class="min-h-screen flex flex-col">
+        <header class="nati-hero bg-gradient-to-r from-indigo-700 via-blue-700 to-slate-900 text-white shadow-md">
+            <div class="max-w-6xl mx-auto px-4 sm:px-6 py-5 flex flex-wrap items-center gap-4 justify-between">
+                <div class="flex items-center gap-3">
+                    <a href="index.html" class="block">
+                        <img src="logo.jpg" alt="NATI logo" class="h-14 w-14 rounded-xl border border-white/40 bg-white object-cover shadow">
+                    </a>
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.2em] text-white/70">CFO dashboards</p>
+                        <h1 class="text-2xl font-semibold">Live P&amp;L and spend insights</h1>
+                    </div>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div class="nati-nav-wrapper">
+                        <button class="nati-nav-toggle" onclick="toggleNav('nav-reports')"><i class="fas fa-bars"></i><span>Menu</span></button>
+                        <nav class="nati-nav" id="nav-reports">
+                            <a href="index.html" class="nati-nav-link"><i class="fas fa-gauge"></i><span>Dashboard</span></a>
+                            <a href="documents.html" class="nati-nav-link"><i class="fas fa-folder-open"></i><span>Documents</span></a>
+                            <a href="upload.html" class="nati-nav-link"><i class="fas fa-upload"></i><span>Upload</span></a>
+                            <a href="drop.html" class="nati-nav-link"><i class="fas fa-layer-group"></i><span>Drop</span></a>
+                            <a href="reports.html" class="nati-nav-link is-active"><i class="fas fa-chart-line"></i><span>Reports</span></a>
+                            <a href="admin.html" class="nati-nav-link hidden" id="nav-admin"><i class="fas fa-user-shield"></i><span>Admin</span></a>
+                        </nav>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <div id="user-pill" class="hidden sm:flex items-center gap-2 px-3 py-2 rounded-2xl border border-white/30 bg-white/10 backdrop-blur">
+                            <div>
+                                <p id="user-name" class="text-sm font-semibold leading-tight">—</p>
+                                <p id="user-role" class="text-[11px] tracking-[0.2em] text-white/70 uppercase">—</p>
+                            </div>
+                        </div>
+                        <button id="logout-btn" class="hidden px-3 py-2 bg-white/15 hover:bg-white/25 text-sm font-semibold rounded-2xl flex items-center gap-2 transition">
+                            <i class="fas fa-sign-out-alt"></i>
+                            <span>Logout</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <main class="flex-1 max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-4">
+            <section class="nati-card bg-white/90 backdrop-blur border border-slate-200 rounded-xl shadow-sm p-4">
+                <div class="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                        <h2 class="text-lg font-semibold">Period</h2>
+                        <p class="text-xs text-slate-500">Select dates to refresh P&L and metrics</p>
+                        <p id="last-updated" class="text-[11px] text-slate-500 mt-1"></p>
+                    </div>
+                    <div class="flex items-center gap-2 text-sm">
+                        <label>From</label>
+                        <input type="date" id="start-date" class="px-2 py-1 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                        <label>To</label>
+                        <input type="date" id="end-date" class="px-2 py-1 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                        <button onclick="refreshReports()" class="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"><i class="fas fa-sync mr-1"></i>Refresh</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                <div class="nati-card compact bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-start gap-3 hover:shadow-md transition">
+                    <div class="p-2 rounded-lg bg-indigo-50 text-indigo-700"><i class="fas fa-arrow-trend-up"></i></div>
+                    <div>
+                        <p class="text-xs uppercase tracking-wide text-slate-500">Revenue</p>
+                        <p id="rev-total" class="text-2xl font-semibold mt-1">-</p>
+                    </div>
+                </div>
+                <div class="nati-card compact bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-start gap-3 hover:shadow-md transition">
+                    <div class="p-2 rounded-lg bg-orange-50 text-orange-700"><i class="fas fa-industry"></i></div>
+                    <div>
+                        <p class="text-xs uppercase tracking-wide text-slate-500">COGS</p>
+                        <p id="cogs-total" class="text-2xl font-semibold mt-1">-</p>
+                    </div>
+                </div>
+                <div class="nati-card compact bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-start gap-3 hover:shadow-md transition">
+                    <div class="p-2 rounded-lg bg-emerald-50 text-emerald-700"><i class="fas fa-wallet"></i></div>
+                    <div>
+                        <p class="text-xs uppercase tracking-wide text-slate-500">Gross Profit</p>
+                        <p id="gross-profit" class="text-2xl font-semibold mt-1">-</p>
+                    </div>
+                </div>
+                <div class="nati-card compact bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-start gap-3 hover:shadow-md transition">
+                    <div class="p-2 rounded-lg bg-rose-50 text-rose-700"><i class="fas fa-receipt"></i></div>
+                    <div>
+                        <p class="text-xs uppercase tracking-wide text-slate-500">Expenses</p>
+                        <p id="exp-total" class="text-2xl font-semibold mt-1">-</p>
+                    </div>
+                </div>
+                <div class="nati-card compact bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-start gap-3 hover:shadow-md transition">
+                    <div class="p-2 rounded-lg bg-slate-100 text-slate-700"><i class="fas fa-chart-pie"></i></div>
+                    <div>
+                        <p class="text-xs uppercase tracking-wide text-slate-500">Net Profit</p>
+                        <p id="net-profit" class="text-2xl font-semibold mt-1">-</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="bg-white border border-slate-200 rounded-xl shadow-sm">
+                <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                    <h3 class="text-md font-semibold">Profit & Loss</h3>
+                </div>
+                <div class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <h4 class="text-sm font-semibold mb-2 text-slate-700">Revenue</h4>
+                        <table class="nati-table min-w-full text-sm">
+                            <tbody id="rev-body" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-semibold mb-2 text-slate-700">COGS</h4>
+                        <table class="nati-table min-w-full text-sm">
+                            <tbody id="cogs-body" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-semibold mb-2 text-slate-700">Expenses</h4>
+                        <table class="nati-table min-w-full text-sm">
+                            <tbody id="exp-body" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <section class="bg-white border border-slate-200 rounded-xl shadow-sm">
+                <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                    <h3 class="text-md font-semibold">Operational Metrics</h3>
+                    <span class="text-xs text-slate-500">Top vendors limited to the largest 3 by spend</span>
+                </div>
+                <div class="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                    <div class="nati-card compact bg-slate-50 rounded-lg p-3 border border-slate-100 space-y-3">
+                        <div>
+                            <h4 class="text-sm font-semibold mb-2 text-slate-700">Documents by Status</h4>
+                            <ul id="docs-status" class="text-sm text-slate-800 space-y-1"></ul>
+                        </div>
+                        <div class="pt-2 border-t border-slate-200">
+                            <h4 class="text-sm font-semibold mb-2 text-slate-700">Spend by Category Group</h4>
+                            <ul id="group-body" class="text-sm text-slate-800 space-y-1"></ul>
+                        </div>
+                    </div>
+                    <div class="nati-card compact bg-slate-50 rounded-lg p-3 border border-slate-100">
+                        <div class="flex items-center justify-between mb-2">
+                            <h4 class="text-sm font-semibold text-slate-700">Top Vendors</h4>
+                            <span class="text-[11px] text-slate-500">Top 3</span>
+                        </div>
+                        <table class="nati-table min-w-full text-sm">
+                            <tbody id="vendor-body" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                    <div class="nati-card compact bg-slate-50 rounded-lg p-3 border border-slate-100">
+                        <h4 class="text-sm font-semibold mb-2 text-slate-700">Spend by Category</h4>
+                        <table class="nati-table min-w-full text-sm">
+                            <tbody id="cat-body" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                    <div class="nati-card compact bg-slate-50 rounded-lg p-3 border border-slate-100">
+                        <h4 class="text-sm font-semibold mb-2 text-slate-700">Spend by Payment Method</h4>
+                        <table class="nati-table min-w-full text-sm">
+                            <tbody id="pay-body" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="js/session.js" defer></script>
+    <script src="js/nav.js" defer></script>
+    <script src="js/reports.js" defer></script>
+</body>
+</html>

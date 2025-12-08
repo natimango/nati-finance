@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drop Overview - NATI Accounting</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/theme.css">
+</head>
+<body class="nati-page bg-gradient-to-br from-slate-50 via-slate-100 to-white text-slate-900">
+    <div class="min-h-screen flex flex-col">
+        <header class="nati-hero bg-gradient-to-r from-indigo-700 via-blue-700 to-slate-900 text-white shadow">
+            <div class="max-w-5xl mx-auto px-4 sm:px-6 py-5 flex flex-wrap items-center gap-4 justify-between">
+                <div class="flex items-center gap-3">
+                    <a href="index.html" class="block">
+                        <img src="logo.jpg" alt="NATI logo" class="h-16 w-16 rounded-2xl border border-white/40 bg-white object-cover shadow">
+                    </a>
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.2em] text-white/70">Drop overview</p>
+                        <h1 class="text-2xl font-semibold">Cost-to-market, live</h1>
+                    </div>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div class="nati-nav-wrapper">
+                        <button class="nati-nav-toggle" onclick="toggleNav('nav-drop')"><i class="fas fa-bars"></i><span>Menu</span></button>
+                        <nav class="nati-nav" id="nav-drop">
+                            <a href="index.html" class="nati-nav-link"><i class="fas fa-gauge"></i><span>Dashboard</span></a>
+                            <a href="documents.html" class="nati-nav-link"><i class="fas fa-folder-open"></i><span>Documents</span></a>
+                            <a href="upload.html" class="nati-nav-link"><i class="fas fa-upload"></i><span>Upload</span></a>
+                            <a href="drop.html" class="nati-nav-link is-active"><i class="fas fa-layer-group"></i><span>Drop</span></a>
+                            <a href="reports.html" class="nati-nav-link"><i class="fas fa-chart-line"></i><span>Reports</span></a>
+                            <a href="admin.html" class="nati-nav-link hidden" id="nav-admin"><i class="fas fa-user-shield"></i><span>Admin</span></a>
+                        </nav>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <div id="user-pill" class="hidden sm:flex items-center gap-2 px-3 py-2 rounded-2xl border border-white/30 bg-white/10 backdrop-blur">
+                            <div>
+                                <p id="user-name" class="text-sm font-semibold leading-tight">—</p>
+                                <p id="user-role" class="text-[11px] tracking-[0.2em] text-white/70 uppercase">—</p>
+                            </div>
+                        </div>
+                        <button id="logout-btn" class="hidden px-3 py-2 bg-white/15 hover:bg-white/25 text-sm font-semibold rounded-2xl flex items-center gap-2 transition">
+                            <i class="fas fa-sign-out-alt"></i>
+                            <span>Logout</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <main class="flex-1 max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+            <section class="nati-card bg-white/90 border border-slate-200 rounded-2xl shadow p-6 space-y-4">
+                <div class="flex flex-wrap items-center gap-4 justify-between">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.2em] text-slate-500">Drop selector</p>
+                        <h2 class="text-2xl font-semibold text-slate-900">Track committed vs paid per drop</h2>
+                        <p class="text-sm text-slate-500">COGS categories, vendors, SKUs, and outstanding balances in one place.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <input id="drop-input" value="Drop 1" class="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
+                        <button onclick="loadDrop()" class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700">Refresh</button>
+                    </div>
+                </div>
+                <div class="text-xs text-slate-500" id="period-label"></div>
+            </section>
+
+            <section class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div class="nati-card compact bg-white border border-slate-200 rounded-2xl shadow-sm p-4">
+                    <p class="text-xs uppercase tracking-wide text-slate-500">Committed</p>
+                    <p id="total-committed" class="text-2xl font-semibold mt-1">-</p>
+                </div>
+                <div class="nati-card compact bg-white border border-slate-200 rounded-2xl shadow-sm p-4">
+                    <p class="text-xs uppercase tracking-wide text-slate-500">Paid</p>
+                    <p id="total-paid" class="text-2xl font-semibold mt-1">-</p>
+                </div>
+                <div class="nati-card compact bg-white border border-slate-200 rounded-2xl shadow-sm p-4">
+                    <p class="text-xs uppercase tracking-wide text-slate-500">Outstanding</p>
+                    <p id="total-outstanding" class="text-2xl font-semibold mt-1">-</p>
+                </div>
+            </section>
+
+            <section class="nati-card bg-white border border-slate-200 rounded-2xl shadow p-5 space-y-4">
+                <div class="flex items-center justify-between flex-wrap gap-3">
+                    <div>
+                        <p class="nati-section-label">Budgets</p>
+                        <h3 class="text-xl font-semibold text-slate-900">Budget vs actual by category group</h3>
+                        <p class="text-xs text-slate-500">Set CFO-level caps per drop to keep spend on track.</p>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-xs uppercase tracking-wide text-slate-500">Budgeted</p>
+                        <p id="budget-total" class="text-xl font-semibold text-slate-900">₹0</p>
+                        <p id="budget-variance" class="text-xs text-slate-500">Variance —</p>
+                    </div>
+                </div>
+                <div class="overflow-auto border border-slate-100 rounded-2xl">
+                    <table class="nati-table text-sm">
+                        <thead>
+                            <tr>
+                                <th>Category Group</th>
+                                <th class="text-right">Budget</th>
+                                <th class="text-right">Actual</th>
+                                <th class="text-right">Variance</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="budget-summary-body"></tbody>
+                    </table>
+                </div>
+                <div class="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3" data-role-required="admin">
+                    <div class="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                            <p class="text-sm font-semibold text-slate-900">Adjust budgets</p>
+                            <p class="text-xs text-slate-500">Enter annual caps per category group for this drop.</p>
+                        </div>
+                        <button id="budget-save" onclick="saveBudgets()" class="btn-primary text-sm px-4 py-2"><i class="fas fa-floppy-disk mr-1"></i>Save budgets</button>
+                    </div>
+                    <div id="budget-form-fields" class="grid grid-cols-1 sm:grid-cols-2 gap-3"></div>
+                    <p id="budget-message" class="text-xs text-slate-500"></p>
+                </div>
+            </section>
+
+            <section class="nati-card bg-white border border-slate-200 rounded-2xl shadow">
+                <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                    <h2 class="text-md font-semibold">By category</h2>
+                </div>
+                <div class="overflow-auto">
+                    <table class="nati-table min-w-full text-sm">
+                        <thead class="bg-slate-50 text-slate-600">
+                            <tr>
+                                <th class="px-4 py-2 text-left">Category</th>
+                                <th class="px-4 py-2 text-right">Committed</th>
+                                <th class="px-4 py-2 text-right">Paid</th>
+                                <th class="px-4 py-2 text-right">Outstanding</th>
+                            </tr>
+                        </thead>
+                        <tbody id="cat-body" class="divide-y divide-slate-100"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div class="nati-card bg-white border border-slate-200 rounded-2xl shadow">
+                    <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                        <h2 class="text-md font-semibold">Top vendors</h2>
+                    </div>
+                    <div class="overflow-auto">
+                        <table class="nati-table min-w-full text-sm">
+                            <thead class="bg-slate-50 text-slate-600">
+                                <tr>
+                                    <th class="px-4 py-2 text-left">Vendor</th>
+                                    <th class="px-4 py-2 text-right">Committed</th>
+                                    <th class="px-4 py-2 text-right">Paid</th>
+                                </tr>
+                            </thead>
+                            <tbody id="vendor-body" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="nati-card bg-white border border-slate-200 rounded-2xl shadow">
+                    <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                        <h2 class="text-md font-semibold">Per SKU (if tagged)</h2>
+                    </div>
+                    <div class="overflow-auto">
+                        <table class="nati-table min-w-full text-sm">
+                            <thead class="bg-slate-50 text-slate-600">
+                                <tr>
+                                    <th class="px-4 py-2 text-left">SKU</th>
+                                    <th class="px-4 py-2 text-right">Spend</th>
+                                </tr>
+                            </thead>
+                            <tbody id="sku-body" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="js/session.js" defer></script>
+    <script src="js/nav.js" defer></script>
+    <script src="js/drop.js" defer></script>
+</body>
+</html>

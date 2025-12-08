@@ -1,0 +1,71 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const cookieParser = require('cookie-parser');
+const pool = require('./config/database');
+const { authenticate } = require('./middleware/auth');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(cors({
+  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : true,
+  credentials: true
+}));
+app.use(cookieParser());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, '../public')));
+
+// API Routes
+const uploadRoutes = require('./routes/uploadRoutes');
+const billRoutes = require('./routes/billRoutes');
+const reportRoutes = require('./routes/reportRoutes');
+const brainRoutes = require('./routes/brainRoutes');
+const authRoutes = require('./routes/authRoutes');
+
+app.use('/api/auth', authRoutes);
+app.use('/api', authenticate, uploadRoutes);
+app.use('/api', authenticate, billRoutes);
+app.use('/api', authenticate, reportRoutes);
+app.use('/api/brain', authenticate, brainRoutes);
+
+app.get('/api/health', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW() as time');
+    const userCount = await pool.query('SELECT COUNT(*) as count FROM users');
+    const docCount = await pool.query('SELECT COUNT(*) as count FROM documents');
+    
+    res.json({
+      status: 'OK',
+      message: 'NATI Accounting System is running!',
+      database: 'Connected',
+      timestamp: result.rows[0].time,
+      stats: {
+        users: parseInt(userCount.rows[0].count),
+        documents: parseInt(docCount.rows[0].count)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      message: error.message
+    });
+  }
+});
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, '../public/index.html'));
+});
+
+app.listen(PORT, () => {
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🚀 NATI Accounting System Started!');
+  console.log(`📍 Dashboard: http://localhost:${PORT}`);
+  console.log(`📊 Reports: http://localhost:${PORT}/reports.html`);
+  console.log(`🤖 AI Provider: OpenAI (primary)`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+});
+
+module.exports = app;

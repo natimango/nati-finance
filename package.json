@@ -1,0 +1,43 @@
+{
+  "name": "nati-accounting",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "echo \"No tests yet\" && exit 0",
+    "create:admin": "node scripts/createAdmin.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natimango/nati-accounting.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/natimango/nati-accounting/issues"
+  },
+  "homepage": "https://github.com/natimango/nati-accounting#readme",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cloudinary": "^2.8.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.11.0",
+    "multer": "^2.0.2",
+    "pdf-parse": "^2.4.5",
+    "pg": "^8.16.3",
+    "sharp": "^0.34.5",
+    "tesseract.js": "^6.0.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
+  }
+}

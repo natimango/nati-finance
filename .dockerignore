@@ -1,0 +1,8 @@
+.DS_Store
+node_modules
+npm-debug.log
+uploads
+tmp
+.env
+.env.*
+*.local

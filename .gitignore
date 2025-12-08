@@ -1,0 +1,11 @@
+.DS_Store
+node_modules/
+npm-debug.log*
+uploads/
+tmp/
+.env
+.env.*
+!.env.docker.example
+!.env.example
+/pg-data
+/uploads-data

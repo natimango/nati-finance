@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: nati-accounting-app
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.docker
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://nati_admin:nati_password@db:5432/nati_accounting
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-changeme}
+      JWT_SECRET: ${JWT_SECRET:-nati-docker-secret}
+    volumes:
+      - uploads-data:/app/uploads
+
+  db:
+    image: postgres:15-alpine
+    container_name: nati-accounting-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nati_admin
+      POSTGRES_PASSWORD: nati_password
+      POSTGRES_DB: nati_accounting
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nati_admin -d nati_accounting"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg-data:
+  uploads-data:

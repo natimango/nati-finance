@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documents & Bills - NATI Accounting</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/theme.css">
+</head>
+<body class="nati-page bg-gradient-to-br from-slate-50 via-slate-100 to-white text-slate-900">
+    <div class="min-h-screen flex flex-col">
+        <header class="nati-hero bg-gradient-to-r from-indigo-700 via-blue-700 to-slate-900 text-white shadow">
+            <div class="max-w-6xl mx-auto px-4 sm:px-6 py-5 flex flex-wrap items-center gap-4 justify-between">
+                <div class="flex items-center gap-3">
+                    <a href="index.html" class="block">
+                        <img src="logo.jpg" alt="NATI logo" class="h-16 w-16 rounded-2xl border border-white/40 bg-white object-cover shadow">
+                    </a>
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.2em] text-white/70">Documents & Bills</p>
+                        <h1 class="text-2xl font-semibold">Capture → Classify → Approve</h1>
+                    </div>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div class="nati-nav-wrapper">
+                        <button class="nati-nav-toggle" onclick="toggleNav('nav-docs')"><i class="fas fa-bars"></i><span>Menu</span></button>
+                        <nav class="nati-nav" id="nav-docs">
+                            <a href="index.html" class="nati-nav-link"><i class="fas fa-gauge"></i><span>Dashboard</span></a>
+                            <a href="documents.html" class="nati-nav-link is-active"><i class="fas fa-folder-open"></i><span>Documents</span></a>
+                            <a href="upload.html" class="nati-nav-link"><i class="fas fa-upload"></i><span>Upload</span></a>
+                            <a href="drop.html" class="nati-nav-link"><i class="fas fa-layer-group"></i><span>Drop</span></a>
+                            <a href="reports.html" class="nati-nav-link"><i class="fas fa-chart-line"></i><span>Reports</span></a>
+                            <a href="admin.html" class="nati-nav-link hidden" id="nav-admin"><i class="fas fa-user-shield"></i><span>Admin</span></a>
+                        </nav>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <div id="user-pill" class="hidden sm:flex items-center gap-2 px-3 py-2 rounded-2xl border border-white/30 bg-white/10 backdrop-blur">
+                            <div>
+                                <p id="user-name" class="text-sm font-semibold leading-tight">—</p>
+                                <p id="user-role" class="text-[11px] tracking-[0.2em] text-white/70 uppercase">—</p>
+                            </div>
+                        </div>
+                        <button id="logout-btn" class="hidden px-3 py-2 bg-white/15 hover:bg-white/25 text-sm font-semibold rounded-2xl flex items-center gap-2 transition">
+                            <i class="fas fa-sign-out-alt"></i>
+                            <span>Logout</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <main class="flex-1 max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+            <section class="nati-card bg-white/90 border border-slate-200 rounded-2xl shadow">
+                <div class="px-6 py-5 border-b border-slate-100 flex flex-wrap items-start gap-4 justify-between">
+                    <div>
+                        <p class="text-xs text-slate-500 uppercase tracking-[0.2em]">Work queue</p>
+                        <h2 class="text-2xl font-semibold text-slate-900">Every bill lives here first</h2>
+                        <p class="text-sm text-slate-500 mt-1">Upload → OCR → AI parse → manual override. Calendar filters, payments, and drop context keep everyone aligned.</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <button onclick="window.location.href='upload.html'" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 transition flex items-center gap-2 shadow">
+                            <i class="fas fa-bolt"></i><span>Upload</span>
+                        </button>
+                        <button onclick="window.location.href='reports.html'" class="px-4 py-2 bg-slate-100 text-slate-800 rounded-lg text-sm hover:bg-slate-200 transition flex items-center gap-2">
+                            <i class="fas fa-chart-area"></i><span>Reports</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 p-6">
+                    <div class="rounded-2xl border border-slate-100 p-4 bg-gradient-to-br from-indigo-50 to-white shadow-sm">
+                        <p class="text-xs uppercase tracking-wide text-indigo-500">Docs showing</p>
+                        <p class="text-3xl font-semibold text-indigo-900 mt-2" id="doc-count-hero">—</p>
+                        <p class="text-xs text-indigo-700 mt-1">Filtered vs total</p>
+                    </div>
+                    <div class="rounded-2xl border border-slate-100 p-4 bg-white shadow-sm">
+                        <p class="text-xs uppercase tracking-wide text-slate-500">Manual required</p>
+                        <p class="text-3xl font-semibold mt-2" id="manual-required-count">—</p>
+                        <p class="text-xs text-slate-500 mt-1">Needs attention</p>
+                    </div>
+                    <div class="rounded-2xl border border-slate-100 p-4 bg-white shadow-sm">
+                        <p class="text-xs uppercase tracking-wide text-slate-500">Processed</p>
+                        <p class="text-3xl font-semibold mt-2" id="processed-count">—</p>
+                        <p class="text-xs text-slate-500 mt-1">Ready for reports</p>
+                    </div>
+                    <div class="rounded-2xl border border-slate-100 p-4 bg-white shadow-sm">
+                        <p class="text-xs uppercase tracking-wide text-slate-500">Shortcuts</p>
+                        <p class="text-sm text-slate-700 mt-2">U: Upload • D: Docs • R: Reports</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="nati-card bg-white border border-slate-200 rounded-2xl shadow">
+                <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                    <div>
+                        <h2 class="text-lg font-semibold">Filters</h2>
+                        <p class="text-xs text-slate-500">Date range, category, payment method, status, and search</p>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs text-slate-600 flex-wrap">
+                        <button onclick="setDateFilter('today')" class="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200">Today</button>
+                        <button onclick="setDateFilter('thisWeek')" class="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200">This Week</button>
+                        <button onclick="setDateFilter('thisMonth')" class="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200">This Month</button>
+                        <button onclick="clearFilters()" class="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200">Clear</button>
+                        <button onclick="loadDocuments()" class="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200">Refresh</button>
+                    </div>
+                </div>
+                <div class="p-6 space-y-4">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div>
+                            <label class="block text-xs font-medium text-slate-600 mb-1">From</label>
+                            <input type="date" id="date-from" onchange="filterDocuments()" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-slate-600 mb-1">To</label>
+                            <input type="date" id="date-to" onchange="filterDocuments()" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-slate-600 mb-1">Category</label>
+                            <select id="filter-category" onchange="filterDocuments()" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                                <option value="">All</option>
+                                <option value="fabric">Fabric</option>
+                                <option value="manufacturing">Manufacturing</option>
+                                <option value="packaging">Packaging</option>
+                                <option value="logistics">Logistics</option>
+                                <option value="vendor">Vendor</option>
+                                <option value="food">Food</option>
+                                <option value="travel">Travel</option>
+                                <option value="rent">Rent</option>
+                                <option value="tech">Tech</option>
+                                <option value="marketing">Marketing</option>
+                                <option value="salary">Salary</option>
+                                <option value="misc">Misc</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-slate-600 mb-1">Status</label>
+                            <select id="filter-status" onchange="filterDocuments()" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                                <option value="">All</option>
+                                <option value="uploaded">Uploaded</option>
+                                <option value="processing">Processing</option>
+                                <option value="processed">Processed</option>
+                                <option value="manual_required">Manual Required</option>
+                                <option value="error">Error</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div>
+                            <label class="block text-xs font-medium text-slate-600 mb-1">Payment Method</label>
+                            <select id="filter-payment" onchange="filterDocuments()" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                                <option value="">All</option>
+                                <option value="cash">Cash</option>
+                                <option value="upi">UPI</option>
+                                <option value="bank_transfer">Bank Transfer</option>
+                                <option value="cheque">Cheque</option>
+                                <option value="other">Other</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-slate-600 mb-1">Search</label>
+                            <input type="text" id="search-box" onkeyup="filterDocuments()" placeholder="Search filename or notes..." class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-slate-600 mb-1">Sort</label>
+                            <select id="sort-by" onchange="sortDocuments()" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                                <option value="date-desc">Newest</option>
+                                <option value="date-asc">Oldest</option>
+                                <option value="name-asc">Name A→Z</option>
+                                <option value="name-desc">Name Z→A</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="active-filters" class="hidden bg-indigo-50 border border-indigo-100 text-indigo-900 rounded-lg px-4 py-3 flex items-center justify-between">
+                <div class="flex items-center gap-2 text-sm">
+                    <i class="fas fa-info-circle"></i>
+                    <span id="filter-summary"></span>
+                </div>
+                <button onclick="clearFilters()" class="text-xs font-semibold hover:underline">Clear all</button>
+            </section>
+
+            <section class="nati-card bg-white border border-slate-200 rounded-2xl shadow">
+                <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                    <div>
+                        <h3 class="text-md font-semibold">Calendar</h3>
+                        <p class="text-xs text-slate-500">Tap dates to filter documents</p>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs">
+                        <span class="text-slate-500">Date by</span>
+                        <div class="inline-flex rounded-md border border-slate-200 overflow-hidden">
+                            <button id="mode-billdate" onclick="setDateMode('bill')" class="px-2 py-1 bg-indigo-600 text-white">Bill</button>
+                            <button id="mode-uploaddate" onclick="setDateMode('upload')" class="px-2 py-1 bg-white text-slate-700">Upload</button>
+                        </div>
+                        <div class="flex items-center gap-2 ml-3">
+                            <button onclick="changeCalendarMonth(-1)" class="px-2 py-1 bg-slate-100 rounded hover:bg-slate-200"><i class="fas fa-chevron-left"></i></button>
+                            <span id="calendar-month" class="text-sm font-semibold text-slate-800"></span>
+                            <button onclick="changeCalendarMonth(1)" class="px-2 py-1 bg-slate-100 rounded hover:bg-slate-200"><i class="fas fa-chevron-right"></i></button>
+                        </div>
+                    </div>
+                </div>
+                <div id="calendar-grid" class="p-4 grid grid-cols-7 gap-2 text-center text-sm text-slate-700"></div>
+            </section>
+
+            <section class="nati-card bg-white border border-slate-200 rounded-2xl shadow">
+                <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                    <div class="flex items-center gap-2">
+                        <h3 class="text-md font-semibold">Documents</h3>
+                        <span id="doc-count" class="text-xs text-slate-500">(0)</span>
+                    </div>
+                </div>
+                <div class="overflow-auto">
+                    <table class="nati-table min-w-full text-sm">
+                        <thead class="bg-slate-50 text-slate-600">
+                            <tr>
+                                <th class="px-4 py-2 text-left">File #</th>
+                                <th class="px-4 py-2 text-left">Vendor</th>
+                                <th class="px-4 py-2 text-left">Category</th>
+                                <th class="px-4 py-2 text-left">Payment</th>
+                                <th class="px-4 py-2 text-left">Status</th>
+                                <th class="px-4 py-2 text-right">Total</th>
+                                <th class="px-4 py-2 text-right">Uploaded</th>
+                            </tr>
+                        </thead>
+                        <tbody id="documents-table-body" class="divide-y divide-slate-100"></tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="detail-pane" class="hidden"></div>
+
+    <div id="preview-modal" class="nati-modal fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-40">
+        <div class="nati-modal-panel bg-white rounded-xl shadow-xl max-w-4xl w-full mx-4">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+                <h3 id="modal-title" class="text-lg font-semibold">Preview</h3>
+                <button onclick="closePreview()" class="text-slate-500 hover:text-slate-800"><i class="fas fa-times"></i></button>
+            </div>
+            <div id="preview-content" class="p-4 max-h-[70vh] overflow-auto text-sm text-slate-800"></div>
+        </div>
+    </div>
+
+    <div id="ai-modal" class="nati-modal fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-40">
+        <div class="nati-modal-panel bg-white rounded-xl shadow-xl max-w-4xl w-full mx-4">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+                <h3 class="text-lg font-semibold">AI Extraction</h3>
+                <button onclick="closeAIModal()" class="text-slate-500 hover:text-slate-800"><i class="fas fa-times"></i></button>
+            </div>
+            <div id="ai-content" class="p-4 max-h-[70vh] overflow-auto text-sm text-slate-800"></div>
+            <div id="ai-actions" class="px-4 py-3 border-t border-slate-100"></div>
+        </div>
+    </div>
+
+    <div id="bill-modal" class="nati-modal fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-40">
+        <div class="nati-modal-panel bg-white rounded-xl shadow-xl max-w-2xl w-full mx-4 max-h-[85vh] overflow-auto">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+                <div>
+                    <h3 id="bill-modal-title" class="text-lg font-semibold"></h3>
+                    <p id="bill-modal-sub" class="text-xs text-slate-500"></p>
+                </div>
+                <button onclick="closeBillModal()" class="text-slate-500 hover:text-slate-800"><i class="fas fa-times"></i></button>
+            </div>
+            <div id="bill-modal-body" class="p-4 space-y-4 text-sm text-slate-800"></div>
+        </div>
+    </div>
+
+    <div id="manual-modal" class="nati-modal fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-start justify-center z-40 overflow-auto">
+        <div class="nati-modal-panel bg-white rounded-xl shadow-xl max-w-4xl w-full mx-4 my-8">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+                <div>
+                    <h3 class="text-lg font-semibold">Manual Bill Entry</h3>
+                    <p class="text-xs text-slate-500">Use when AI parsing is insufficient</p>
+                </div>
+                <button onclick="closeManualModal()" class="text-slate-500 hover:text-slate-800"><i class="fas fa-times"></i></button>
+            </div>
+            <form class="p-4 space-y-4" onsubmit="submitManual(event)">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Vendor Name *</label>
+                        <input id="manual-vendor-name" required class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Bill Number</label>
+                        <input id="manual-bill-number" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Bill Date</label>
+                        <input id="manual-bill-date" type="date" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Category *</label>
+                        <select id="manual-category" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500" required>
+                            <option value="">Select...</option>
+                            <option value="fabric">Fabric</option>
+                            <option value="manufacturing">Manufacturing</option>
+                            <option value="packaging">Packaging</option>
+                            <option value="logistics">Logistics</option>
+                            <option value="vendor">Vendor</option>
+                            <option value="food">Food & Meals</option>
+                            <option value="travel">Travel & Transportation</option>
+                            <option value="marketing">Marketing</option>
+                            <option value="tech">Tech</option>
+                            <option value="rent">Rent & Utilities</option>
+                            <option value="salary">Salary</option>
+                            <option value="misc">Misc</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Subtotal</label>
+                        <input id="manual-subtotal" type="number" step="0.01" min="0" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Tax Amount</label>
+                        <input id="manual-tax" type="number" step="0.01" min="0" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Total Amount *</label>
+                        <input id="manual-total" type="number" step="0.01" min="0" required class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Payment Method *</label>
+                        <select id="manual-payment-method" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500" required>
+                            <option value="">Select method...</option>
+                            <option value="CASH">Cash</option>
+                            <option value="UPI">UPI</option>
+                            <option value="BANK_TRANSFER">Bank Transfer</option>
+                            <option value="CHEQUE">Cheque</option>
+                            <option value="OTHER">Other</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Payment Terms</label>
+                        <select id="manual-pay-type" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                            <option value="FULL">Full</option>
+                            <option value="ADVANCE">Advance + Balance</option>
+                            <option value="NET_30">Net 30</option>
+                            <option value="NET_45">Net 45</option>
+                            <option value="NET_60">Net 60</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Advance % (if any)</label>
+                        <input id="manual-advance" type="number" step="0.01" min="0" max="100" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Custom Due Date</label>
+                        <input id="manual-due-date" type="date" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">Department</label>
+                        <select id="manual-department" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500">
+                            <option value="">Select</option>
+                            <option value="COGS">COGS</option>
+                            <option value="Marketing">Marketing</option>
+                            <option value="Ops">Operations</option>
+                            <option value="Admin">Admin</option>
+                            <option value="Misc">Misc</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1">Notes</label>
+                    <textarea id="manual-notes" rows="3" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500"></textarea>
+                </div>
+
+                <div>
+                    <div class="flex items-center justify-between mb-2">
+                        <p class="text-sm font-semibold">Line Items</p>
+                        <button type="button" onclick="addLineItemRow()" class="px-3 py-1 text-xs bg-indigo-100 text-indigo-700 rounded-md hover:bg-indigo-200"><i class="fas fa-plus mr-1"></i>Add Row</button>
+                    </div>
+                    <div class="overflow-auto border border-slate-200 rounded-lg">
+                    <table class="nati-table min-w-full text-sm">
+                            <thead class="bg-slate-50 text-slate-600">
+                                <tr>
+                                    <th class="px-3 py-2 text-left">Description</th>
+                                    <th class="px-3 py-2 text-left">SKU (optional)</th>
+                                    <th class="px-3 py-2 text-right">Qty</th>
+                                    <th class="px-3 py-2 text-right">Rate</th>
+                                    <th class="px-3 py-2 text-right">Amount</th>
+                                    <th class="px-3 py-2 text-right">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="manual-line-items" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <p id="manual-error" class="text-sm text-red-600"></p>
+
+                <div class="flex items-center justify-end gap-2">
+                    <button type="button" onclick="closeManualModal()" class="px-4 py-2 bg-slate-100 text-slate-800 rounded-lg hover:bg-slate-200">Cancel</button>
+                    <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">Save Bill</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="js/session.js" defer></script>
+    <script src="js/nav.js" defer></script>
+    <script src="js/documents.js" defer></script>
+</body>
+</html>
