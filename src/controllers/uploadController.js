@@ -5,13 +5,28 @@ const fs = require('fs');
 const { preprocessFile } = require('../services/preprocessService');
 const sharp = require('sharp');
 const { extractWithRules } = require('../services/ruleExtractor');
-const groqService = require('../services/groqService');
 const { parseInvoiceText } = require('../services/aiParser');
 const { normalizeCategory } = require('../utils/categoryMap');
 
 const uploadDir = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const DEFAULT_JOURNAL_USER_ID = parseInt(process.env.SYSTEM_USER_ID || '1', 10);
+
+function safeParseJSON(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    return null;
+  }
+}
+
+function resolveJournalUser(preferred) {
+  return preferred || DEFAULT_JOURNAL_USER_ID;
 }
 
 const storage = multer.diskStorage({
@@ -121,7 +136,12 @@ const uploadBill = async (req, res) => {
       [file.originalname, file.path, file.size, file.mimetype, category || 'uncategorized', paymentMethod, notes || null, uploaderId, 'processing']
     );
     
-    const document = docResult.rows[0];
+    const document = {
+      ...docResult.rows[0],
+      document_category: category || docResult.rows[0].document_category || 'uncategorized',
+      payment_method: paymentMethod,
+      drop_name: dropName
+    };
 
     // 2. Preprocess (OCR/text extraction) and store raw text
     let rawText = '';
@@ -158,6 +178,20 @@ const uploadBill = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+function hasActionablePaymentTerms(terms) {
+  if (!terms) return false;
+  const type = (terms.type || '').toUpperCase();
+  const hasInstallments = Array.isArray(terms.installments) && terms.installments.length > 0;
+  const hasAdvance = typeof terms.advance_percentage === 'number' && terms.advance_percentage > 0;
+  const hasDueDate = Boolean(terms.due_date);
+  const hasNet = Boolean(terms.net_days) || type.startsWith('NET_');
+  if (hasInstallments) return true;
+  if (type === 'ADVANCE') {
+    return hasAdvance && hasDueDate;
+  }
+  return hasDueDate || hasNet;
+}
 
 // Background AI processing with accounting entries
 async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMethod = 'UNSPECIFIED') {
@@ -197,7 +231,7 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
       return;
     }
     
-    const provider = extraction.provider || (extraction.groqFallback ? 'groq' : extraction.ruleFallback ? 'rule' : 'openai');
+    const provider = extraction.provider || 'openai';
     const data = { 
       ...extraction.data, 
       _provider: provider, 
@@ -205,8 +239,9 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
     };
     console.log('✓ Extracted:', data.vendor_name, '₹' + data.amounts?.total);
 
-    // Only keep line items for fabric/manufacturing categories; drop otherwise
-    const categoryInfo = normalizeCategory(data.category || document.document_category || 'misc');
+    // Respect user-selected category first; AI suggestion only fills gaps
+    const chosenCategory = document.document_category || data.category || 'misc';
+    const categoryInfo = normalizeCategory(chosenCategory);
     data.category = categoryInfo.category;
     data.category_group = categoryInfo.category_group;
     const effectiveCategory = categoryInfo.category;
@@ -275,11 +310,22 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
       }
     }
     
-    // Create payment terms and schedule
-    await createPaymentSchedule(billId, data);
+    // Create payment terms/schedule and determine payment status
+    const scheduleCreated = await createPaymentSchedule(billId, {
+      bill_date: data.bill_date || document.bill_date,
+      amounts: data.amounts || { total: data.total_amount || 0 },
+      payment_terms: data.payment_terms
+    });
+    const paymentStatus = scheduleCreated ? 'pending' : 'paid';
+    await pool.query('UPDATE bills SET payment_status = $1 WHERE bill_id = $2', [paymentStatus, billId]);
     
     // 🎯 CREATE ACCOUNTING ENTRIES (Double Entry)
-    await createAccountingEntries(billId, data, vendorId);
+    await createAccountingEntries(
+      billId,
+      data,
+      vendorId,
+      { createdBy: resolveJournalUser(document.uploaded_by) }
+    );
     
     console.log('✅ Complete: Bill recorded with accounting entries\n');
     
@@ -315,57 +361,100 @@ async function createOrUpdateVendor(data) {
   return result.rows[0]?.vendor_id || null;
 }
 
-async function createPaymentSchedule(billId, data) {
+async function createPaymentSchedule(billId, data = {}) {
   const terms = data.payment_terms;
-  const totalAmount = data.amounts?.total || 0;
+  await pool.query('DELETE FROM payment_terms WHERE bill_id = $1', [billId]);
+  await pool.query('DELETE FROM payment_schedule WHERE bill_id = $1', [billId]);
+
+  if (!hasActionablePaymentTerms(terms)) {
+    return false;
+  }
+
+  const totalAmount = Number(data.amounts?.total ?? data.total_amount ?? 0);
   const billDate = new Date(data.bill_date || new Date());
-  
-  // Save payment terms
-  if (terms) {
-    await pool.query(
-      `INSERT INTO payment_terms (bill_id, payment_type, total_amount, advance_percentage, installment_count, terms_text)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [billId, terms.type || 'FULL', totalAmount, terms.advance_percentage || null, 
-       terms.installments?.length || null, terms.description || null]
-    );
+  const type = (terms.type || '').toUpperCase();
+  const dueDate = terms.due_date ? new Date(terms.due_date) : null;
+  const installments = Array.isArray(terms.installments) ? terms.installments : [];
+  const advancePct = terms.advance_percentage != null ? Number(terms.advance_percentage) : null;
+  const netDays = Number(terms.net_days || (type.startsWith('NET_') ? type.replace('NET_', '') : NaN));
+
+  await pool.query(
+    `INSERT INTO payment_terms (bill_id, payment_type, total_amount, advance_percentage, installment_count, terms_text)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [billId, type || 'FULL', totalAmount, advancePct || null, installments.length || null, terms.description || null]
+  );
+
+  if (installments.length > 0) {
+    for (let i = 0; i < installments.length; i++) {
+      const inst = installments[i];
+      if (!inst.due_date) continue;
+      await pool.query(
+        `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          billId,
+          i + 1,
+          new Date(inst.due_date),
+          Number(inst.amount || (totalAmount / installments.length))
+        ]
+      );
+    }
+    return true;
   }
-  
-  // Create payment schedule based on terms
-  if (terms?.type === 'NET_30' || terms?.type === 'NET_45' || terms?.type === 'NET_60') {
-    const days = terms.net_days || 30;
-    const dueDate = new Date(billDate);
-    dueDate.setDate(dueDate.getDate() + days);
-    
-    await pool.query(
-      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
-       VALUES ($1, $2, $3, $4)`,
-      [billId, 1, dueDate.toISOString().split('T')[0], totalAmount]
-    );
-  } else if (terms?.due_date) {
-    await pool.query(
-      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
-       VALUES ($1, $2, $3, $4)`,
-      [billId, 1, terms.due_date, totalAmount]
-    );
-  } else {
-    // Default: 30 days
-    const dueDate = new Date(billDate);
-    dueDate.setDate(dueDate.getDate() + 30);
-    
-    await pool.query(
-      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
-       VALUES ($1, $2, $3, $4)`,
-      [billId, 1, dueDate.toISOString().split('T')[0], totalAmount]
-    );
+
+  if (type === 'ADVANCE') {
+    if (!advancePct || !dueDate) {
+      return false;
+    }
+    const advanceAmount = Number((totalAmount * advancePct) / 100);
+    const balanceAmount = Math.max(totalAmount - advanceAmount, 0);
+    if (advanceAmount > 0) {
+      await pool.query(
+        `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due, amount_paid, payment_status)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [billId, 1, billDate, advanceAmount, advanceAmount, 'PAID']
+      );
+    }
+    if (balanceAmount > 0) {
+      await pool.query(
+        `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
+         VALUES ($1, $2, $3, $4)`,
+        [billId, advanceAmount > 0 ? 2 : 1, dueDate, balanceAmount]
+      );
+    }
+    return true;
   }
+
+  if (!Number.isNaN(netDays) && netDays > 0) {
+    const netDue = new Date(billDate);
+    netDue.setDate(netDue.getDate() + netDays);
+    await pool.query(
+      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
+       VALUES ($1, $2, $3, $4)`,
+      [billId, 1, netDue, totalAmount]
+    );
+    return true;
+  }
+
+  if (dueDate) {
+    await pool.query(
+      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
+       VALUES ($1, $2, $3, $4)`,
+      [billId, 1, dueDate, totalAmount]
+    );
+    return true;
+  }
+
+  return false;
 }
 
 // 🎯 CREATE DOUBLE-ENTRY ACCOUNTING
-async function createAccountingEntries(billId, data, vendorId) {
+async function createAccountingEntries(billId, data, vendorId, options = {}) {
   const category = data.category || 'misc';
   const subtotal = data.amounts?.subtotal || 0;
   const taxAmount = data.amounts?.tax_amount || 0;
   const total = data.amounts?.total || 0;
+  const createdBy = resolveJournalUser(options.createdBy || data.created_by || null);
   
   // Get or create GL accounts
   const expenseAccount = await getGLAccount(category);
@@ -385,7 +474,7 @@ async function createAccountingEntries(billId, data, vendorId) {
       total,
       total,
       'posted',
-      1
+      createdBy
     ]
   );
   
@@ -455,31 +544,65 @@ const getDocuments = async (req, res) => {
     const result = await pool.query(
       `SELECT 
         d.*,
-       v.vendor_name,
-       b.bill_id,
-       b.bill_number,
-       b.bill_date,
-       COALESCE(b.category, d.document_category) AS category,
-       b.total_amount,
-       b.category AS bill_category,
-       b.category_group,
-       COALESCE(b.payment_method, d.payment_method) AS payment_method,
-       b.drop_name,
-       b.trip_name,
-       b.channel,
-       b.campaign,
-       b.department,
-       b.status as bill_status,
-       b.payment_status
+        v.vendor_name,
+        b.bill_id,
+        b.bill_number,
+        b.bill_date,
+        COALESCE(b.category, d.document_category) AS category,
+        b.total_amount,
+        b.category AS bill_category,
+        b.category_group,
+        COALESCE(b.payment_method, d.payment_method) AS payment_method,
+        b.payment_method AS bill_payment_method,
+        b.drop_name,
+        b.trip_name,
+        b.channel,
+        b.campaign,
+        b.department,
+        b.status as bill_status,
+        b.payment_status,
+        pt.payment_type AS bill_payment_type,
+        pt.advance_percentage AS bill_advance_percentage,
+        pt.terms_text AS bill_payment_terms_text,
+        ps.due_date AS bill_payment_due_date
        FROM documents d
        LEFT JOIN bills b ON b.document_id = d.document_id
        LEFT JOIN vendors v ON b.vendor_id = v.vendor_id
+       LEFT JOIN LATERAL (
+         SELECT payment_type, advance_percentage, terms_text
+         FROM payment_terms
+         WHERE bill_id = b.bill_id
+         ORDER BY term_id DESC
+         LIMIT 1
+       ) pt ON true
+       LEFT JOIN LATERAL (
+         SELECT due_date
+         FROM payment_schedule
+         WHERE bill_id = b.bill_id
+         ORDER BY due_date ASC
+         LIMIT 1
+       ) ps ON true
        ORDER BY d.uploaded_at DESC`
     );
     const userId = req.user?.userId;
     const role = req.user?.role || 'uploader';
     const canManageAll = role === 'manager' || role === 'admin';
     const docs = result.rows.map((row) => {
+      const parsedGemini = safeParseJSON(row.gemini_data);
+      if (parsedGemini) {
+        row.gemini_data = parsedGemini;
+      }
+      if (row.bill_payment_method) {
+        row.payment_method = row.bill_payment_method;
+      }
+      if (row.bill_payment_type || row.bill_advance_percentage || row.bill_payment_due_date || row.bill_payment_terms_text) {
+        row.payment_terms = {
+          type: row.bill_payment_type || 'FULL',
+          advance_percentage: row.bill_advance_percentage,
+          due_date: row.bill_payment_due_date,
+          description: row.bill_payment_terms_text || null
+        };
+      }
       const ownsDoc = row.uploaded_by === userId;
       return {
         ...row,
@@ -503,13 +626,93 @@ const getDocuments = async (req, res) => {
 const getDocument = async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await pool.query('SELECT * FROM documents WHERE document_id = $1', [id]);
-    
-    if (result.rows.length === 0) {
+    const docResult = await pool.query(
+      `SELECT 
+         d.*,
+         b.bill_id,
+         b.vendor_id,
+         b.bill_number,
+         b.bill_date,
+         b.due_date,
+         b.subtotal AS bill_subtotal,
+         b.tax_amount AS bill_tax_amount,
+         b.total_amount AS bill_total_amount,
+         b.category AS bill_category,
+         b.category_group AS bill_category_group,
+         b.payment_method AS bill_payment_method,
+         b.drop_name AS bill_drop_name,
+         b.trip_name AS bill_trip_name,
+         b.channel AS bill_channel,
+         b.campaign AS bill_campaign,
+         b.department AS bill_department,
+         b.tags AS bill_tags,
+         b.status AS bill_status,
+         b.payment_status AS bill_payment_status,
+         pt.payment_type AS bill_payment_type,
+         pt.advance_percentage AS bill_advance_percentage,
+         pt.terms_text AS bill_payment_terms_text,
+         ps.due_date AS bill_payment_due_date,
+         v.vendor_name AS bill_vendor_name
+       FROM documents d
+       LEFT JOIN bills b ON b.document_id = d.document_id
+       LEFT JOIN vendors v ON b.vendor_id = v.vendor_id
+       LEFT JOIN LATERAL (
+         SELECT payment_type, advance_percentage, terms_text
+         FROM payment_terms
+         WHERE bill_id = b.bill_id
+         ORDER BY term_id DESC
+         LIMIT 1
+       ) pt ON true
+       LEFT JOIN LATERAL (
+         SELECT due_date
+         FROM payment_schedule
+         WHERE bill_id = b.bill_id
+         ORDER BY due_date ASC
+         LIMIT 1
+       ) ps ON true
+       WHERE d.document_id = $1`,
+      [id]
+    );
+
+    if (docResult.rows.length === 0) {
       return res.status(404).json({ error: 'Document not found' });
     }
-    
-    res.json({ success: true, document: result.rows[0] });
+
+    const document = docResult.rows[0];
+    const parsedGemini = safeParseJSON(document.gemini_data);
+    if (parsedGemini) {
+      document.gemini_data = parsedGemini;
+    }
+    if (document.bill_payment_method) {
+      document.payment_method = document.bill_payment_method;
+    }
+    if (document.bill_payment_type || document.bill_advance_percentage || document.bill_payment_due_date || document.bill_payment_terms_text) {
+      document.payment_terms = {
+        type: document.bill_payment_type || 'FULL',
+        advance_percentage: document.bill_advance_percentage,
+        due_date: document.bill_payment_due_date,
+        description: document.bill_payment_terms_text || null
+      };
+    }
+    let lineItems = [];
+    if (document.bill_id) {
+      const itemsResult = await pool.query(
+        `SELECT description, sku_code, quantity, unit_price, amount, line_number
+         FROM bill_items
+         WHERE bill_id = $1
+         ORDER BY line_number ASC`,
+        [document.bill_id]
+      );
+      lineItems = itemsResult.rows;
+    }
+
+    res.json({
+      success: true,
+      document: {
+        ...document,
+        line_items: lineItems
+      }
+    });
   } catch (error) {
     console.error('Get document error:', error);
     res.status(500).json({ error: error.message });

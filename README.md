@@ -1,6 +1,4 @@
-# NATI Accounting – Current System Overview
-
-This repo is a monolithic Node.js (CommonJS) app with Postgres, Express, and a browser-based UI in `public/`. It powers AI-assisted bill ingestion, OCR, parsing, and basic reporting. This README captures the current shape of the system, what’s enabled, and how to run it locally.
+# NATI Accounting
 
 ## Stack
 - Node.js + Express (CommonJS)
@@ -29,7 +27,7 @@ This repo is a monolithic Node.js (CommonJS) app with Postgres, Express, and a b
 - `src/config/` – database config.
 - `src/routes/` – route definitions (upload, bills, reports, brain).
 - `src/controllers/` – business logic (billController, uploadController, reportsController, etc.).
-- `src/services/` – AI parser (OpenAI primary, Groq/heuristic fallback), OCR preprocessing.
+- `src/services/` – AI parser (OpenAI primary, heuristic fallback), OCR preprocessing.
 - `src/migrations/` – SQL schema (documents, bills, vendors, line items, payments, journal, budgets, etc.).
 - `public/` – UI pages and JS (documents listing, upload, reports dashboard).
 
@@ -38,12 +36,12 @@ Create a `.env` with:
 ```
 DATABASE_URL=postgres://user:pass@host:port/db
 PORT=3000
-AI_PROVIDER=openai          # openai (default) | groq | heuristic
+AI_PROVIDER=openai          # openai (default) | heuristic
 OPENAI_API_KEY=...          # required for openai provider
-GROQ_API_KEY=...            # if using groq provider
 JWT_SECRET=super-long-random-string
 UPLOAD_IMAGE_MAX_DIM=2000   # optional resize limit in pixels
 UPLOAD_IMAGE_JPEG_QUALITY=80
+SYSTEM_USER_ID=1            # fallback user id for system journal entries
 ```
 Adjust keys based on the provider you actually enable.
 
@@ -88,8 +86,8 @@ Migrations live in `src/migrations/`. Apply them using your preferred SQL runner
 
 ## AI Parser
 - Entry point: `src/services/aiParser.js` (pluggable via `AI_PROVIDER`).
-- Heuristic/default: regex + rule-based parsing on OCR text.
-- OpenAI/Groq/heuristic branches are present; ensure API keys and provider are set before use.
+- Heuristic/default: regex + rule-based parsing on OCR text for zero-cost fallback.
+- OpenAI is the only external provider; make sure `OPENAI_API_KEY` is set if you enable it.
 - Always designed to fail gracefully and allow manual processing.
 
 ## Current UI Notes
@@ -107,4 +105,4 @@ Migrations live in `src/migrations/`. Apply them using your preferred SQL runner
 ## Development Tips
 - Use `npm run dev` for hot reload via nodemon.
 - Check console for server start banner to verify it’s running on the expected port.
-- Keep AI provider set to `heuristic` for zero-cost local parsing; switch to OpenAI when keys are configured (Groq optional).
+- Keep AI provider set to `heuristic` for zero-cost local parsing; switch to OpenAI when keys are configured.

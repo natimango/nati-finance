@@ -1,4 +1,5 @@
 // Very lightweight heuristic extractor as fallback when AI is unavailable
+const { normalizeCategory } = require('../utils/categoryMap');
 
 function extractTotals(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -59,18 +60,76 @@ function extractLineItems(text) {
   return items.slice(0, 10);
 }
 
+const SIMPLE_RECEIPT_RULES = [
+  { type: 'fuel', keywords: ['petrol', 'diesel', 'bharat petroleum', 'indian oil', 'hpcl', 'fuel surcharge'], category: 'travel', description: 'Fuel purchase', department: 'ops' },
+  { type: 'cab', keywords: ['uber', 'ola', 'rapido', 'meru', 'ola money', 'ride id'], category: 'travel', description: 'Cab / ride expense', department: 'ops' },
+  { type: 'flight', keywords: ['air india', 'indigo', 'vistara', 'airasia', 'go air', 'flight', 'air ticket', 'boarding pass', 'pnr'], category: 'travel', description: 'Flight / air ticket', department: 'ops' },
+  { type: 'food', keywords: ['restaurant', 'swiggy', 'zomato', 'ubereats', 'cafe', 'hotel bill', 'meal', 'food'], category: 'food_meals', description: 'Food & meals', department: 'product' },
+  { type: 'tech', keywords: ['aws', 'digitalocean', 'vultr', 'vercel', 'github', 'notion', 'slack'], category: 'tech', description: 'Tech / SaaS', department: 'ops' }
+];
+
+function guessLargestAmount(text) {
+  const matches = text.replace(/[,₹]/g, '').match(/(\d+(?:\.\d+)?)/g);
+  if (!matches) return 0;
+  return matches.reduce((max, curr) => {
+    const val = parseFloat(curr);
+    if (Number.isNaN(val)) return max;
+    return val > max ? val : max;
+  }, 0);
+}
+
+function detectSimpleReceipt(rawText, totals) {
+  if (!rawText) return null;
+  const lower = rawText.toLowerCase();
+  const rule = SIMPLE_RECEIPT_RULES.find(pattern =>
+    pattern.keywords.some(keyword => lower.includes(keyword))
+  );
+  if (!rule) return null;
+  const normalized = normalizeCategory(rule.category);
+  const totalAmount = totals.total || totals.subtotal || guessLargestAmount(rawText) || 0;
+  return {
+    ...normalized,
+    department: rule.department || null,
+    receipt_type: rule.type,
+    is_simple_receipt: true,
+    line_items: [{
+      description: rule.description,
+      quantity: 1,
+      rate: totalAmount,
+      amount: totalAmount,
+      sku_code: ''
+    }]
+  };
+}
+
 function extractWithRules(rawText) {
   if (!rawText || rawText.length < 10) return null;
   const totals = extractTotals(rawText);
   const vendor = extractVendor(rawText);
   const date = extractDates(rawText);
-  const lineItems = extractLineItems(rawText);
+  const simpleReceipt = detectSimpleReceipt(rawText, totals);
+  if (simpleReceipt && simpleReceipt.line_items && simpleReceipt.line_items.length) {
+    const lineAmount = simpleReceipt.line_items[0].amount || 0;
+    if ((!totals.total || totals.total === 0) && lineAmount) {
+      totals.total = lineAmount;
+    }
+    if ((!totals.subtotal || totals.subtotal === 0) && lineAmount) {
+      totals.subtotal = lineAmount;
+    }
+  }
+  const normalizedCategory = simpleReceipt
+    ? { category: simpleReceipt.category, category_group: simpleReceipt.category_group }
+    : null;
+  const lineItems = simpleReceipt?.line_items || extractLineItems(rawText);
   return {
     vendor_name: vendor.vendor_name,
     bill_date: date,
     amounts: totals,
     line_items: lineItems,
-    category: null,
+    category: normalizedCategory ? normalizedCategory.category : null,
+    category_group: normalizedCategory ? normalizedCategory.category_group : null,
+    department: simpleReceipt?.department || null,
+    receipt_type: simpleReceipt?.receipt_type || null,
     payment_terms: null,
     confidence: 0.3 // low confidence heuristic
   };

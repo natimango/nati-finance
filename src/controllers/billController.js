@@ -5,12 +5,29 @@ const fs = require('fs');
 const path = require('path');
 const { normalizeCategory } = require('../utils/categoryMap');
 
+const DEFAULT_JOURNAL_USER_ID = parseInt(process.env.SYSTEM_USER_ID || '1', 10);
+const resolveJournalUser = (preferred) => preferred || DEFAULT_JOURNAL_USER_ID;
+
 function validateDimensions(category, dropName, channel, campaign) {
   const isCOGS = false; // drop/channel validation removed
   return null;
 }
 
-// Process bill with AI (OpenAI primary, Groq/rule fallback)
+function hasActionablePaymentTerms(terms) {
+  if (!terms) return false;
+  const type = (terms.type || '').toUpperCase();
+  const hasInstallments = Array.isArray(terms.installments) && terms.installments.length > 0;
+  const hasAdvance = typeof terms.advance_percentage === 'number' && terms.advance_percentage > 0;
+  const hasDueDate = Boolean(terms.due_date);
+  const hasNet = Boolean(terms.net_days) || type.startsWith('NET_');
+  if (hasInstallments) return true;
+  if (type === 'ADVANCE') {
+    return hasAdvance && hasDueDate;
+  }
+  return hasDueDate || hasNet;
+}
+
+// Process bill with AI (OpenAI primary, heuristic fallback)
 async function processBillWithAI(req, res) {
   try {
     const { document_id } = req.params;
@@ -45,7 +62,7 @@ async function processBillWithAI(req, res) {
         if (parsed.raw_text) rawTextHint = parsed.raw_text;
       } catch (_) {}
     }
-    // If no raw text cached, preprocess now to get text for Groq/rule fallback
+    // If no raw text cached, preprocess now to get text for heuristic fallback
     if (!rawTextHint) {
       try {
         const pre = await preprocessFile(document.file_path, document.file_type);
@@ -78,7 +95,7 @@ async function processBillWithAI(req, res) {
       return res.status(500).json({ error: 'AI extraction failed', details: extraction?.error });
     }
     
-    const provider = extraction.provider || (extraction.groqFallback ? 'groq' : extraction.ruleFallback ? 'rule' : 'openai');
+    const provider = extraction.provider || 'openai';
     const data = { 
       ...extraction.data, 
       _provider: provider, 
@@ -156,25 +173,13 @@ async function processBillWithAI(req, res) {
     
     const billId = billResult.rows[0].bill_id;
     
-    // Save payment terms
-    if (data.payment_terms) {
-      await pool.query(
-        `INSERT INTO payment_terms 
-         (bill_id, payment_type, total_amount, advance_percentage, installment_count, terms_text)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          billId,
-          data.payment_terms.type || 'FULL',
-          data.amounts?.total || 0,
-          data.payment_terms.advance_percentage || null,
-          data.payment_terms.installments?.length || null,
-          data.payment_terms.description || null
-        ]
-      );
-      
-      // Create payment schedule
-      await createPaymentSchedule(billId, data);
-    }
+    const aiScheduleCreated = await createPaymentSchedule(billId, {
+      bill_date: data.bill_date,
+      amounts: data.amounts || { total: data.total_amount || 0 },
+      payment_terms: data.payment_terms
+    });
+    const aiPaymentStatus = aiScheduleCreated ? 'pending' : 'paid';
+    await pool.query('UPDATE bills SET payment_status = $1 WHERE bill_id = $2', [aiPaymentStatus, billId]);
     
     // Save line items
     if (data.line_items && data.line_items.length > 0) {
@@ -544,6 +549,16 @@ async function processBillManual(req, res) {
       return res.status(400).json({ error: 'category is required' });
     }
 
+    if (payment_terms?.type === 'ADVANCE') {
+      const adv = Number(payment_terms.advance_percentage || 0);
+      if (!adv || adv <= 0) {
+        return res.status(400).json({ error: 'Advance payment terms require an advance percentage' });
+      }
+      if (!payment_terms.due_date) {
+        return res.status(400).json({ error: 'Advance payment terms require a due date for the balance' });
+      }
+    }
+
     const categoryInfo = normalizeCategory(category || document.document_category || 'misc');
     const normalizedCategory = categoryInfo.category;
     const categoryGroup = categoryInfo.category_group;
@@ -666,23 +681,13 @@ async function processBillManual(req, res) {
       billId = billResult.rows[0].bill_id;
     }
 
-    // Save payment terms & schedule if provided
-    if (payment_terms) {
-      await pool.query(
-        `INSERT INTO payment_terms 
-         (bill_id, payment_type, total_amount, advance_percentage, installment_count, terms_text)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          billId,
-          payment_terms.type || 'FULL',
-          total_amount,
-          payment_terms.advance_percentage || null,
-          payment_terms.installments?.length || null,
-          payment_terms.description || null
-        ]
-      );
-      await createPaymentSchedule(billId, { bill_date, amounts: { total: total_amount }, payment_terms });
-    }
+    const manualScheduleCreated = await createPaymentSchedule(billId, {
+      bill_date,
+      amounts: { total: total_amount },
+      payment_terms
+    });
+    const manualPaymentStatus = manualScheduleCreated ? 'pending' : 'paid';
+    await pool.query('UPDATE bills SET payment_status = $1 WHERE bill_id = $2', [manualPaymentStatus, billId]);
 
     // Save line items
     if (Array.isArray(line_items) && line_items.length > 0) {
@@ -716,7 +721,7 @@ async function processBillManual(req, res) {
         tax_amount: tax_amount || 0,
         total: total_amount
       }
-    }, vendorId);
+    }, vendorId, { createdBy: resolveJournalUser(req.user?.userId || null) });
 
     // Update document status and stash manual data
     await pool.query(
@@ -738,7 +743,8 @@ async function processBillManual(req, res) {
           campaign,
           department,
           amounts: { subtotal, tax_amount, total: total_amount },
-          line_items
+          line_items,
+          payment_terms: payment_terms || null
         }),
         notes || null,
         document_id
@@ -757,80 +763,100 @@ async function processBillManual(req, res) {
   }
 }
 
-// Create payment schedule based on extracted terms
-async function createPaymentSchedule(billId, data) {
+async function createPaymentSchedule(billId, data = {}) {
   const terms = data.payment_terms;
-  const totalAmount = data.amounts?.total || 0;
+  await pool.query('DELETE FROM payment_terms WHERE bill_id = $1', [billId]);
+  await pool.query('DELETE FROM payment_schedule WHERE bill_id = $1', [billId]);
+
+  if (!hasActionablePaymentTerms(terms)) {
+    return false;
+  }
+
+  const totalAmount = Number(data.amounts?.total ?? data.total_amount ?? 0);
   const billDate = new Date(data.bill_date || new Date());
-  
-  if (terms.type === 'FULL' && terms.due_date) {
-    // Single payment with specific due date
-    await pool.query(
-      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
-       VALUES ($1, $2, $3, $4)`,
-      [billId, 1, terms.due_date, totalAmount]
-    );
-  } else if (terms.type === 'NET_30' || terms.type === 'NET_45' || terms.type === 'NET_60') {
-    // Net payment terms
-    const days = terms.net_days || 30;
-    const dueDate = new Date(billDate);
-    dueDate.setDate(dueDate.getDate() + days);
-    
-    await pool.query(
-      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
-       VALUES ($1, $2, $3, $4)`,
-      [billId, 1, dueDate.toISOString().split('T')[0], totalAmount]
-    );
-  } else if (terms.type === 'ADVANCE' && terms.advance_percentage) {
-    // Advance + Balance
-    const advanceAmount = (totalAmount * terms.advance_percentage) / 100;
-    const balanceAmount = totalAmount - advanceAmount;
-    
-    // Advance payment - due immediately
-    await pool.query(
-      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
-       VALUES ($1, $2, $3, $4)`,
-      [billId, 1, billDate.toISOString().split('T')[0], advanceAmount]
-    );
-    
-    // Balance - due on delivery or specified date
-    const balanceDue = terms.installments?.[1]?.due_date || 
-                       new Date(billDate.getTime() + 30*24*60*60*1000).toISOString().split('T')[0];
-    
-    await pool.query(
-      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
-       VALUES ($1, $2, $3, $4)`,
-      [billId, 2, balanceDue, balanceAmount]
-    );
-  } else if (terms.type === 'INSTALLMENT' && terms.installments) {
-    // Multiple installments
-    for (const inst of terms.installments) {
-      const amount = (totalAmount * inst.percentage) / 100;
+  const type = (terms.type || '').toUpperCase();
+  const dueDate = terms.due_date ? new Date(terms.due_date) : null;
+  const installments = Array.isArray(terms.installments) ? terms.installments : [];
+  const advancePct = terms.advance_percentage != null ? Number(terms.advance_percentage) : null;
+  const netDays = Number(terms.net_days || (type.startsWith('NET_') ? type.replace('NET_', '') : NaN));
+
+  await pool.query(
+    `INSERT INTO payment_terms (bill_id, payment_type, total_amount, advance_percentage, installment_count, terms_text)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [billId, type || 'FULL', totalAmount, advancePct || null, installments.length || null, terms.description || null]
+  );
+
+  if (installments.length > 0) {
+    for (let i = 0; i < installments.length; i++) {
+      const inst = installments[i];
+      if (!inst.due_date) continue;
       await pool.query(
         `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
          VALUES ($1, $2, $3, $4)`,
-        [billId, inst.number, inst.due_date, amount]
+        [
+          billId,
+          i + 1,
+          new Date(inst.due_date),
+          Number(inst.amount || (totalAmount / installments.length))
+        ]
       );
     }
-  } else {
-    // Default: full payment due in 30 days
-    const dueDate = new Date(billDate);
-    dueDate.setDate(dueDate.getDate() + 30);
-    
+    return true;
+  }
+
+  if (type === 'ADVANCE') {
+    if (!advancePct || !dueDate) {
+      return false;
+    }
+    const advanceAmount = Number((totalAmount * advancePct) / 100);
+    const balanceAmount = Math.max(totalAmount - advanceAmount, 0);
+    if (advanceAmount > 0) {
+      await pool.query(
+        `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due, amount_paid, payment_status)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [billId, 1, billDate, advanceAmount, advanceAmount, 'PAID']
+      );
+    }
+    if (balanceAmount > 0) {
+      await pool.query(
+        `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
+         VALUES ($1, $2, $3, $4)`,
+        [billId, advanceAmount > 0 ? 2 : 1, dueDate, balanceAmount]
+      );
+    }
+    return true;
+  }
+
+  if (!Number.isNaN(netDays) && netDays > 0) {
+    const netDue = new Date(billDate);
+    netDue.setDate(netDue.getDate() + netDays);
     await pool.query(
       `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
        VALUES ($1, $2, $3, $4)`,
-      [billId, 1, dueDate.toISOString().split('T')[0], totalAmount]
+      [billId, 1, netDue, totalAmount]
     );
+    return true;
   }
+
+  if (dueDate) {
+    await pool.query(
+      `INSERT INTO payment_schedule (bill_id, installment_number, due_date, amount_due)
+       VALUES ($1, $2, $3, $4)`,
+      [billId, 1, dueDate, totalAmount]
+    );
+    return true;
+  }
+
+  return false;
 }
 
 // Double-entry accounting for a bill
-async function createAccountingEntries(billId, data, vendorId) {
+async function createAccountingEntries(billId, data, vendorId, options = {}) {
   const category = data.category || 'misc';
   const subtotal = data.amounts?.subtotal || 0;
   const taxAmount = data.amounts?.tax_amount || 0;
   const total = data.amounts?.total || 0;
+  const createdBy = resolveJournalUser(options.createdBy || data.created_by || null);
 
   const expenseAccount = await getGLAccount(category);
   const inputTaxAccount = await getGLAccount('input_tax');
@@ -848,7 +874,7 @@ async function createAccountingEntries(billId, data, vendorId) {
       total,
       total,
       'posted',
-      1
+      createdBy
     ]
   );
 

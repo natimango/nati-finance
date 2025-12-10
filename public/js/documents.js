@@ -30,7 +30,7 @@ function formatLabel(value) {
 
 function getPayment(doc) {
     // Payment should come directly from the chosen method on upload/manual save
-    return doc.payment_method || doc.document_payment_method || '—';
+    return doc.bill_payment_method || doc.payment_method || doc.document_payment_method || '—';
 }
 
 function getDocDate(doc) {
@@ -460,9 +460,8 @@ function getProviderInfo(aiData) {
     try {
         const provider = aiData._provider || (aiData._fallback ? 'fallback' : null);
         if (aiData._note) return `AI: ${provider || 'heuristic'} (${aiData._note})`;
-        if (provider === 'groq') return 'AI: Groq';
         if (provider === 'openai') return 'AI: OpenAI';
-        if (provider === 'rule') return 'AI: Heuristic';
+        if (provider === 'rule' || provider === 'heuristic') return 'AI: Heuristic';
         if (aiData.manual) return 'Manual';
         return provider ? `AI: ${provider}` : null;
     } catch (_) {
@@ -810,49 +809,120 @@ function setDateMode(mode) {
 }
 
 // Manual Processing Helpers
-function openManualModal(documentId) {
-    const doc = allDocuments.find(d => d.document_id === documentId);
+async function openManualModal(documentId) {
+    let doc = allDocuments.find(d => d.document_id === documentId) || null;
+    let billLineItems = null;
+
+    try {
+        const response = await authFetch(`${API_URL}/documents/${documentId}`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.success && data.document) {
+                const detail = data.document;
+                doc = doc ? { ...doc, ...detail } : detail;
+                billLineItems = Array.isArray(detail.line_items) ? detail.line_items : null;
+                if (detail.gemini_data && !doc.gemini_data) {
+                    doc.gemini_data = detail.gemini_data;
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Failed to load document detail', err);
+    }
+
     if (!doc) return;
+    populateManualForm(doc, billLineItems);
+}
+
+function populateManualForm(doc, billLineItems) {
     currentManualDoc = doc;
     const gemData = doc.gemini_data || {};
     const amounts = gemData.amounts || {};
 
-    manualLineItems = (gemData.line_items && Array.isArray(gemData.line_items))
-        ? JSON.parse(JSON.stringify(doc.gemini_data.line_items))
-        : [];
-    if (manualLineItems.length === 0) {
-        manualLineItems.push({
+    if (Array.isArray(billLineItems) && billLineItems.length) {
+        manualLineItems = billLineItems.map(item => ({
+            description: item.description || '',
+            sku_code: item.sku_code || '',
+            quantity: Number(item.quantity || 0),
+            rate: item.unit_price != null ? Number(item.unit_price) : Number(item.rate || 0),
+            amount: Number(item.amount || 0)
+        }));
+    } else if (gemData.line_items && Array.isArray(gemData.line_items)) {
+        manualLineItems = gemData.line_items.map((item) => ({
+            description: item.description || '',
+            sku_code: item.sku_code || '',
+            quantity: Number(item.quantity || 0),
+            rate: Number(item.rate || 0),
+            amount: Number(item.amount || 0)
+        }));
+    } else {
+        manualLineItems = [{
             description: doc.file_name || gemData.bill_number || 'Line item',
             sku_code: '',
             quantity: 1,
-            rate: parseFloat(doc.total_amount || amounts.total || 0) || 0,
-            amount: parseFloat(doc.total_amount || amounts.total || 0) || 0
-        });
+            rate: parseFloat(doc.bill_total_amount ?? doc.total_amount ?? amounts.total ?? 0) || 0,
+            amount: parseFloat(doc.bill_total_amount ?? doc.total_amount ?? amounts.total ?? 0) || 0
+        }];
     }
-    const vendorName = doc.vendor_name || gemData.vendor_name || '';
+
+    const vendorName = doc.bill_vendor_name || doc.vendor_name || gemData.vendor_name || '';
     document.getElementById('manual-vendor-name').value = vendorName;
+
     document.getElementById('manual-bill-number').value = doc.bill_number || gemData.bill_number || '';
     const rawBillDate = doc.bill_date || gemData.bill_date || '';
-    document.getElementById('manual-bill-date').value = rawBillDate
-        ? rawBillDate.split('T')[0]
-        : '';
-    const manualCat = getCategory(doc);
+    document.getElementById('manual-bill-date').value = rawBillDate ? rawBillDate.split('T')[0] : '';
+
+    const manualCat = doc.bill_category || getCategory(doc);
     document.getElementById('manual-category').value = (manualCat && manualCat !== '—') ? manualCat : 'misc';
-    document.getElementById('manual-subtotal').value = doc.subtotal || amounts.subtotal || '';
-    const taxGuess = doc.tax_amount || amounts.tax_amount ||
-        ((amounts.cgst || 0) + (amounts.sgst || 0) + (amounts.igst || 0));
-    document.getElementById('manual-tax').value = taxGuess || '';
-    document.getElementById('manual-total').value = doc.total_amount || amounts.total || '';
-    const payMethod = getPayment(doc);
+
+    const subtotalGuess = (doc.bill_subtotal ?? doc.subtotal ?? amounts.subtotal) || '';
+    document.getElementById('manual-subtotal').value = subtotalGuess;
+
+    const taxGuess = (doc.bill_tax_amount ?? doc.tax_amount ?? amounts.tax_amount ??
+        ((amounts.cgst || 0) + (amounts.sgst || 0) + (amounts.igst || 0))) || '';
+    document.getElementById('manual-tax').value = taxGuess;
+
+    const totalGuess = (doc.bill_total_amount ?? doc.total_amount ?? amounts.total) || '';
+    document.getElementById('manual-total').value = totalGuess;
+
+    const payMethod = doc.bill_payment_method || getPayment(doc);
     document.getElementById('manual-payment-method').value = (payMethod && payMethod !== '—') ? payMethod : '';
-    document.getElementById('manual-pay-type').value = 'FULL';
-    document.getElementById('manual-advance').value = '';
-    document.getElementById('manual-due-date').value = '';
+
+    const mergedTerms = doc.payment_terms
+        || gemData.payment_terms
+        || ((doc.bill_payment_type || doc.bill_advance_percentage || doc.bill_payment_due_date) ? {
+            type: doc.bill_payment_type,
+            advance_percentage: doc.bill_advance_percentage,
+            due_date: doc.bill_payment_due_date
+        } : null)
+        || {};
+    doc.payment_terms = mergedTerms;
+
+    document.getElementById('manual-pay-type').value = mergedTerms.type || 'FULL';
+    document.getElementById('manual-advance').value = mergedTerms.advance_percentage ?? '';
+    const due = mergedTerms.due_date ? mergedTerms.due_date.split('T')[0] : '';
+    document.getElementById('manual-due-date').value = due;
     document.getElementById('manual-notes').value = doc.notes || '';
     document.getElementById('manual-department').value = doc.department || '';
     document.getElementById('manual-error').textContent = '';
+    syncManualPaymentFields();
     renderLineItems();
     document.getElementById('manual-modal').classList.remove('hidden');
+}
+
+function syncManualPaymentFields() {
+    const payTypeEl = document.getElementById('manual-pay-type');
+    const advanceInput = document.getElementById('manual-advance');
+    if (!payTypeEl || !advanceInput) return;
+    const wrapper = advanceInput.parentElement;
+    if (payTypeEl.value === 'ADVANCE') {
+        advanceInput.disabled = false;
+        if (wrapper) wrapper.classList.remove('opacity-50');
+    } else {
+        advanceInput.disabled = true;
+        advanceInput.value = '';
+        if (wrapper) wrapper.classList.add('opacity-50');
+    }
 }
 
 function closeManualModal() {
@@ -952,6 +1022,21 @@ async function submitManual(event) {
         errorEl.textContent = 'Payment method is required.';
         return;
     }
+    if (payload.payment_terms.type === 'ADVANCE') {
+        if (!payload.payment_terms.advance_percentage || payload.payment_terms.advance_percentage <= 0) {
+            errorEl.textContent = 'Advance percentage is required for advance payment terms.';
+            return;
+        }
+        if (!payload.payment_terms.due_date) {
+            errorEl.textContent = 'Advance payment terms need a due date for the balance.';
+            return;
+        }
+    } else {
+        payload.payment_terms.advance_percentage = null;
+        if (!payload.payment_terms.due_date) {
+            payload.payment_terms.due_date = null;
+        }
+    }
 
     try {
         const response = await authFetch(`${API_URL}/bills/${currentManualDoc.document_id}/manual`, {
@@ -978,6 +1063,10 @@ document.addEventListener('DOMContentLoaded', () => {
         window.sessionReady.then(() => loadDocuments()).catch(() => {});
     } else {
         loadDocuments();
+    }
+    const payTypeEl = document.getElementById('manual-pay-type');
+    if (payTypeEl) {
+        payTypeEl.addEventListener('change', syncManualPaymentFields);
     }
 });
 

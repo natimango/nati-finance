@@ -235,11 +235,23 @@ table caption {
   color: var(--nati-muted);
 }
 
+@media (max-width: 1024px) {
+  .nati-hero .max-w-6xl {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1.5rem;
+  }
+  .nati-card {
+    border-radius: 1rem;
+  }
+}
+
 @media (max-width: 768px) {
   .nati-nav-wrapper {
     flex-direction: column;
-    align-items: flex-end;
+    align-items: stretch;
     width: 100%;
+    gap: 0.5rem;
   }
 
   .nati-nav-toggle {
@@ -250,7 +262,8 @@ table caption {
     width: 100%;
     flex-direction: column;
     display: none;
-    margin-top: 0.5rem;
+    margin-top: 0.25rem;
+    gap: 0.4rem;
   }
 
   .nati-nav.is-open {
@@ -261,5 +274,34 @@ table caption {
     width: 100%;
     justify-content: flex-start;
     padding: 0.55rem 0.85rem;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  main {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+
+  .nati-card,
+  .nati-card.compact {
+    padding: 1.25rem;
+    border-radius: 0.9rem;
+  }
+
+  .nati-table {
+    min-width: 640px;
+    font-size: 0.85rem;
+  }
+
+  .nati-table-wrapper,
+  .nati-table-container,
+  .overflow-auto {
+    overflow-x: auto;
+  }
+
+  .nati-hero img {
+    height: 3.5rem;
+    width: 3.5rem;
   }
 }

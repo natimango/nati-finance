@@ -1,5 +1,4 @@
-// OpenAI is the primary AI provider; Groq and heuristic are fallbacks.
-const groqService = require('./groqService');
+// OpenAI is the primary AI provider; heuristics are fallback.
 const { extractBillFromText: extractOpenAI } = require('./openaiService');
 const { extractWithRules } = require('./ruleExtractor');
 
@@ -11,19 +10,19 @@ const MAX_OCR_LENGTH = parseInt(process.env.MAX_AI_OCR_LENGTH || '12000', 10);
 const AI_PROVIDER = (process.env.AI_PROVIDER || 'openai').toLowerCase();
 
 function shouldSkipAI(ocrText) {
-  // Empty or too long -> skip
-  if (!ocrText || ocrText.length < 10) return 'No OCR text';
-  if (ocrText.length > MAX_OCR_LENGTH) return 'OCR too long';
+  if (!ocrText || ocrText.length < 10) return { block: true, reason: 'No OCR text' };
+  if (ocrText.length > MAX_OCR_LENGTH) return { block: true, reason: 'OCR too long' };
 
-  // Rate limit per minute
   const now = Date.now();
   if (now - aiCallWindowStart > 60000) {
     aiCallWindowStart = now;
     aiCallCount = 0;
   }
-  if (aiCallCount >= MAX_CALLS_PER_MIN) return 'AI budget limit';
+  if (aiCallCount >= MAX_CALLS_PER_MIN) {
+    return { block: false, throttled: true, reason: 'AI budget limit' };
+  }
 
-  return null;
+  return { block: false, throttled: false, reason: null };
 }
 
 function markCall() {
@@ -32,11 +31,11 @@ function markCall() {
 
 /**
  * Parse invoice text using configured provider.
- * Provider via AI_PROVIDER env: 'openai' (default) | 'groq' | 'heuristic'.
+ * Provider via AI_PROVIDER env: 'openai' (default) | 'heuristic'.
  * Returns { success, data?, provider?, error? }
  */
 async function parseInvoiceText(ocrText, opts = {}) {
-  const provider = AI_PROVIDER === 'heuristic' || AI_PROVIDER === 'groq' ? AI_PROVIDER : 'openai';
+  const provider = AI_PROVIDER === 'heuristic' ? 'heuristic' : 'openai';
   const filePath = opts.filePath;
   const fileType = opts.fileType;
 
@@ -55,33 +54,48 @@ async function parseInvoiceText(ocrText, opts = {}) {
   const heuristic = ocrText ? extractWithRules(ocrText) : null;
   const heuristicOk = heuristic && heuristic.vendor_name && heuristic.amounts && heuristic.amounts.total;
 
-  const skipReason = shouldSkipAI(ocrText);
-  if (skipReason || provider === 'heuristic') {
+  const skipMeta = shouldSkipAI(ocrText);
+  if (skipMeta.block) {
     if (heuristicOk) {
       return {
         success: true,
-        data: { ...heuristic, _provider: 'rule', _fallback: true, _note: skipReason || 'heuristic sufficient' },
+        data: { ...heuristic, _provider: 'rule', _fallback: true, _note: skipMeta.reason },
         provider: 'rule',
         fallback: true
       };
     }
-    if (skipReason) {
-      return { success: false, error: `AI skipped: ${skipReason}` };
-    }
+    return { success: false, error: `AI skipped: ${skipMeta.reason}` };
   }
+
+  if (provider === 'heuristic') {
+    if (heuristicOk) {
+      return {
+        success: true,
+        data: { ...heuristic, _provider: 'rule', _fallback: false },
+        provider: 'rule',
+        fallback: false
+      };
+    }
+    return { success: false, error: 'Heuristic parser failed' };
+  }
+
+  const throttled = skipMeta.throttled;
 
   // Try selected provider, then fallbacks
-  if (provider === 'openai') {
-    markCall();
-    const oai = await extractOpenAI(ocrText || '');
-    if (oai && oai.success) return wrap(oai, 'openai', false);
+  if (throttled && heuristicOk) {
+    return {
+      success: true,
+      data: { ...heuristic, _provider: 'rule', _fallback: true, _note: 'AI throttled' },
+      provider: 'rule',
+      fallback: true
+    };
   }
 
-  if (provider === 'groq' || provider === 'openai') {
-    if (ocrText) {
+  if (provider === 'openai') {
+    if (!throttled || !heuristicOk) {
       markCall();
-      const gq = await groqService.extractBillFromText(ocrText);
-      if (gq && gq.success) return wrap(gq, 'groq', provider !== 'groq');
+      const oai = await extractOpenAI(ocrText || '');
+      if (oai && oai.success) return wrap(oai, 'openai', false);
     }
   }
 

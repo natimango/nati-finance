@@ -226,13 +226,16 @@ async function getWatchdog(req, res) {
                b.bill_number,
                b.bill_date,
                b.total_amount,
-               COALESCE(SUM(p.amount_paid), 0) AS paid
+               COALESCE(SUM(p.amount_paid), 0) AS paid,
+               COUNT(s.bill_id) AS schedule_rows
         FROM bills b
         LEFT JOIN payments p ON p.bill_id = b.bill_id
+        LEFT JOIN payment_schedule s ON s.bill_id = b.bill_id
         LEFT JOIN vendors v ON v.vendor_id = b.vendor_id
         WHERE (b.status IS NULL OR b.status NOT IN ('deleted','void'))
         GROUP BY b.bill_id, v.vendor_name, b.bill_number, b.bill_date, b.total_amount
         HAVING COALESCE(SUM(p.amount_paid), 0) < b.total_amount
+           AND (COALESCE(SUM(p.amount_paid), 0) > 0 OR COUNT(s.bill_id) > 0)
            AND b.bill_date < NOW() - INTERVAL '30 DAYS'
         ORDER BY b.bill_date ASC
         LIMIT 20

@@ -7,7 +7,6 @@
 ## AI parsing abstraction
 - `src/services/aiParser.js` wraps providers:
   - `AI_PROVIDER=openai` (default) uses the OpenAI client.
-  - `AI_PROVIDER=groq` uses Groq text-only extraction (`GROQ_API_KEY` required).
   - `AI_PROVIDER=heuristic` uses regex/heuristic fallback.
 - All providers normalize to a ParsedInvoice-like object; controllers just call `parseInvoiceText`.
 
@@ -29,7 +28,6 @@
 - Upload/parse: use existing upload endpoint; documents/listing routes show status/provider badges.
 - Switch AI providers:
   - `AI_PROVIDER=openai` (default, requires `OPENAI_API_KEY`)
-  - `AI_PROVIDER=groq` (needs `GROQ_API_KEY`)
   - `AI_PROVIDER=heuristic` (local regex-based)
   - Location: `src/services/aiParser.js`
 
