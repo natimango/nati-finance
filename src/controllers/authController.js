@@ -3,9 +3,12 @@ const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 const { COOKIE_NAME, JWT_SECRET } = require('../middleware/auth');
 
-const secureCookie = String(process.env.COOKIE_SECURE || '').toLowerCase() === 'true'
-  ? true
-  : process.env.NODE_ENV === 'production';
+let secureCookie;
+if (typeof process.env.COOKIE_SECURE === 'string' && process.env.COOKIE_SECURE.length) {
+  secureCookie = process.env.COOKIE_SECURE.toLowerCase() === 'true';
+} else {
+  secureCookie = process.env.NODE_ENV === 'production';
+}
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
