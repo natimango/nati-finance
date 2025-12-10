@@ -3,10 +3,14 @@ const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 const { COOKIE_NAME, JWT_SECRET } = require('../middleware/auth');
 
+const secureCookie = String(process.env.COOKIE_SECURE || '').toLowerCase() === 'true'
+  ? true
+  : process.env.NODE_ENV === 'production';
+
 const COOKIE_OPTIONS = {
   httpOnly: true,
   sameSite: 'lax',
-  secure: process.env.NODE_ENV === 'production',
+  secure: secureCookie,
   maxAge: 1000 * 60 * 60 * 12, // 12 hours
   path: '/'
 };
