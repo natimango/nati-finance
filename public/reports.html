@@ -11,8 +11,9 @@
 <body class="nati-page bg-gradient-to-br from-slate-50 via-slate-100 to-white text-slate-900">
     <div class="min-h-screen flex flex-col">
         <header class="nati-hero bg-gradient-to-r from-indigo-700 via-blue-700 to-slate-900 text-white shadow-md">
-            <div class="max-w-6xl mx-auto px-4 sm:px-6 py-5 flex flex-wrap items-center gap-4 justify-between">
-                <div class="flex items-center gap-3">
+            <div class="nati-shell">
+                <div class="py-5 flex flex-wrap items-center gap-4 justify-between">
+                    <div class="flex items-center gap-3">
                     <a href="index.html" class="block">
                         <img src="logo.jpg" alt="NATI logo" class="h-14 w-14 rounded-xl border border-white/40 bg-white object-cover shadow">
                     </a>
@@ -21,8 +22,8 @@
                         <h1 class="text-2xl font-semibold">Live P&amp;L and spend insights</h1>
                     </div>
                 </div>
-                <div class="flex items-center gap-4">
-                    <div class="nati-nav-wrapper">
+                    <div class="flex items-center gap-4">
+                        <div class="nati-nav-wrapper">
                         <button class="nati-nav-toggle" onclick="toggleNav('nav-reports')"><i class="fas fa-bars"></i><span>Menu</span></button>
                         <nav class="nati-nav" id="nav-reports">
                             <a href="index.html" class="nati-nav-link"><i class="fas fa-gauge"></i><span>Dashboard</span></a>
@@ -33,24 +34,26 @@
                             <a href="admin.html" class="nati-nav-link hidden" id="nav-admin"><i class="fas fa-user-shield"></i><span>Admin</span></a>
                         </nav>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <div id="user-pill" class="hidden sm:flex items-center gap-2 px-3 py-2 rounded-2xl border border-white/30 bg-white/10 backdrop-blur">
+                        <div class="flex items-center gap-2">
+                            <div id="user-pill" class="hidden sm:flex items-center gap-2 px-3 py-2 rounded-2xl border border-white/30 bg-white/10 backdrop-blur">
                             <div>
                                 <p id="user-name" class="text-sm font-semibold leading-tight">—</p>
                                 <p id="user-role" class="text-[11px] tracking-[0.2em] text-white/70 uppercase">—</p>
                             </div>
                         </div>
-                        <button id="logout-btn" class="hidden px-3 py-2 bg-white/15 hover:bg-white/25 text-sm font-semibold rounded-2xl flex items-center gap-2 transition">
-                            <i class="fas fa-sign-out-alt"></i>
-                            <span>Logout</span>
-                        </button>
+                            <button id="logout-btn" class="hidden px-3 py-2 bg-white/15 hover:bg-white/25 text-sm font-semibold rounded-2xl flex items-center gap-2 transition">
+                                <i class="fas fa-sign-out-alt"></i>
+                                <span>Logout</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
         </header>
 
-        <main class="flex-1 max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-4">
-            <section class="nati-card bg-white/90 backdrop-blur border border-slate-200 rounded-xl shadow-sm p-4">
+        <main class="flex-1 py-6">
+            <div class="nati-shell max-w-6xl mx-auto space-y-4">
+                <section class="nati-card bg-white/90 backdrop-blur border border-slate-200 rounded-xl shadow-sm p-4">
                 <div class="flex items-center justify-between gap-3 flex-wrap">
                     <div>
                         <h2 class="text-lg font-semibold">Period</h2>
@@ -170,6 +173,7 @@
                     </div>
                 </div>
             </section>
+            </div>
         </main>
     </div>
 

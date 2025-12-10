@@ -28,6 +28,23 @@ function formatLabel(value) {
     return v.toString().replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function setSelectValue(id, value, fallback = '') {
+    const el = document.getElementById(id);
+    if (!el) return false;
+    const normalized = (value || '').toString().trim();
+    if (!normalized) {
+        el.value = fallback;
+        return false;
+    }
+    const match = Array.from(el.options).find(opt => opt.value.toUpperCase() === normalized.toUpperCase());
+    if (match) {
+        el.value = match.value;
+        return true;
+    }
+    el.value = fallback;
+    return false;
+}
+
 function getPayment(doc) {
     // Payment should come directly from the chosen method on upload/manual save
     return doc.bill_payment_method || doc.payment_method || doc.document_payment_method || '—';
@@ -872,8 +889,8 @@ function populateManualForm(doc, billLineItems) {
     const rawBillDate = doc.bill_date || gemData.bill_date || '';
     document.getElementById('manual-bill-date').value = rawBillDate ? rawBillDate.split('T')[0] : '';
 
-    const manualCat = doc.bill_category || getCategory(doc);
-    document.getElementById('manual-category').value = (manualCat && manualCat !== '—') ? manualCat : 'misc';
+    const manualCat = doc.bill_category || doc.category || doc.document_category || getCategory(doc);
+    setSelectValue('manual-category', (manualCat && manualCat !== '—') ? manualCat : 'misc', 'misc');
 
     const subtotalGuess = (doc.bill_subtotal ?? doc.subtotal ?? amounts.subtotal) || '';
     document.getElementById('manual-subtotal').value = subtotalGuess;
@@ -885,8 +902,8 @@ function populateManualForm(doc, billLineItems) {
     const totalGuess = (doc.bill_total_amount ?? doc.total_amount ?? amounts.total) || '';
     document.getElementById('manual-total').value = totalGuess;
 
-    const payMethod = doc.bill_payment_method || getPayment(doc);
-    document.getElementById('manual-payment-method').value = (payMethod && payMethod !== '—') ? payMethod : '';
+    const payMethod = doc.bill_payment_method || doc.payment_method || doc.document_payment_method || getPayment(doc);
+    setSelectValue('manual-payment-method', (payMethod && payMethod !== '—') ? payMethod : '', '');
 
     const mergedTerms = doc.payment_terms
         || gemData.payment_terms
@@ -898,17 +915,17 @@ function populateManualForm(doc, billLineItems) {
         || {};
     doc.payment_terms = mergedTerms;
 
-    document.getElementById('manual-pay-type').value = mergedTerms.type || 'FULL';
+    setSelectValue('manual-pay-type', mergedTerms.type || 'FULL', 'FULL');
     document.getElementById('manual-advance').value = mergedTerms.advance_percentage ?? '';
     const due = mergedTerms.due_date ? mergedTerms.due_date.split('T')[0] : '';
     document.getElementById('manual-due-date').value = due;
-document.getElementById('manual-notes').value = doc.notes || '';
-document.getElementById('manual-department').value = doc.department || '';
-document.getElementById('manual-error').textContent = '';
-syncManualPaymentFields();
-updateManualAdvanceSummary();
-renderLineItems();
-document.getElementById('manual-modal').classList.remove('hidden');
+    document.getElementById('manual-notes').value = doc.notes || '';
+    setSelectValue('manual-department', doc.department || '', '');
+    document.getElementById('manual-error').textContent = '';
+    syncManualPaymentFields();
+    updateManualAdvanceSummary();
+    renderLineItems();
+    document.getElementById('manual-modal').classList.remove('hidden');
 }
 
 function syncManualPaymentFields() {
