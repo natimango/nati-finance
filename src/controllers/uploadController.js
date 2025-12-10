@@ -366,7 +366,7 @@ async function createPaymentSchedule(billId, data = {}) {
   await pool.query('DELETE FROM payment_terms WHERE bill_id = $1', [billId]);
   await pool.query('DELETE FROM payment_schedule WHERE bill_id = $1', [billId]);
 
-  if (!hasActionablePaymentTerms(terms)) {
+  if (!hasActionablePaymentTerms(terms) || (terms.type && terms.type.toUpperCase() !== 'ADVANCE')) {
     return false;
   }
 

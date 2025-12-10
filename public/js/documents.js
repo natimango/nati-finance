@@ -902,27 +902,53 @@ function populateManualForm(doc, billLineItems) {
     document.getElementById('manual-advance').value = mergedTerms.advance_percentage ?? '';
     const due = mergedTerms.due_date ? mergedTerms.due_date.split('T')[0] : '';
     document.getElementById('manual-due-date').value = due;
-    document.getElementById('manual-notes').value = doc.notes || '';
-    document.getElementById('manual-department').value = doc.department || '';
-    document.getElementById('manual-error').textContent = '';
-    syncManualPaymentFields();
-    renderLineItems();
-    document.getElementById('manual-modal').classList.remove('hidden');
+document.getElementById('manual-notes').value = doc.notes || '';
+document.getElementById('manual-department').value = doc.department || '';
+document.getElementById('manual-error').textContent = '';
+syncManualPaymentFields();
+updateManualAdvanceSummary();
+renderLineItems();
+document.getElementById('manual-modal').classList.remove('hidden');
 }
 
 function syncManualPaymentFields() {
     const payTypeEl = document.getElementById('manual-pay-type');
     const advanceInput = document.getElementById('manual-advance');
+    const dueInput = document.getElementById('manual-due-date');
     if (!payTypeEl || !advanceInput) return;
     const wrapper = advanceInput.parentElement;
     if (payTypeEl.value === 'ADVANCE') {
         advanceInput.disabled = false;
         if (wrapper) wrapper.classList.remove('opacity-50');
+        if (dueInput) dueInput.required = true;
     } else {
         advanceInput.disabled = true;
         advanceInput.value = '';
         if (wrapper) wrapper.classList.add('opacity-50');
+        if (dueInput) {
+            dueInput.required = false;
+            dueInput.value = '';
+        }
     }
+    updateManualAdvanceSummary();
+}
+
+function updateManualAdvanceSummary() {
+    const note = document.getElementById('manual-balance-note');
+    if (!note) return;
+    const payType = document.getElementById('manual-pay-type')?.value || 'FULL';
+    const total = parseFloat(document.getElementById('manual-total')?.value || 0);
+    const advancePct = parseFloat(document.getElementById('manual-advance')?.value || 0);
+    const dueDateRaw = document.getElementById('manual-due-date')?.value || '';
+
+    if (payType !== 'ADVANCE' || !total) {
+        note.textContent = '';
+        return;
+    }
+    const advanceAmount = advancePct ? (total * advancePct) / 100 : 0;
+    const balance = Math.max(total - advanceAmount, 0);
+    const dateLabel = dueDateRaw ? `due on ${formatDateDisplay(dueDateRaw)}` : 'set a due date';
+    note.textContent = `Balance ₹${balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${dateLabel}`;
 }
 
 function closeManualModal() {
@@ -1068,6 +1094,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (payTypeEl) {
         payTypeEl.addEventListener('change', syncManualPaymentFields);
     }
+    ['manual-advance', 'manual-total', 'manual-due-date'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('input', updateManualAdvanceSummary);
+            el.addEventListener('change', updateManualAdvanceSummary);
+        }
+    });
 });
 
 
