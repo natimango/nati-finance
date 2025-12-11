@@ -544,6 +544,7 @@ const getDocuments = async (req, res) => {
     const result = await pool.query(
       `SELECT 
         d.*,
+        d.payment_method AS document_payment_method,
         v.vendor_name,
         b.bill_id,
         b.bill_number,
@@ -592,9 +593,13 @@ const getDocuments = async (req, res) => {
       if (parsedGemini) {
         row.gemini_data = parsedGemini;
       }
-      if (row.bill_payment_method) {
-        row.payment_method = row.bill_payment_method;
-      }
+      const effectivePayment =
+        row.bill_payment_method ||
+        row.document_payment_method ||
+        row.payment_method ||
+        null;
+      row.payment_method = effectivePayment;
+      row.category = row.bill_category || row.document_category || row.category;
       if (row.bill_payment_type || row.bill_advance_percentage || row.bill_payment_due_date || row.bill_payment_terms_text) {
         row.payment_terms = {
           type: row.bill_payment_type || 'FULL',
@@ -629,6 +634,7 @@ const getDocument = async (req, res) => {
     const docResult = await pool.query(
       `SELECT 
          d.*,
+         d.payment_method AS document_payment_method,
          b.bill_id,
          b.vendor_id,
          b.bill_number,
@@ -685,6 +691,8 @@ const getDocument = async (req, res) => {
     }
     if (document.bill_payment_method) {
       document.payment_method = document.bill_payment_method;
+    } else if (document.document_payment_method) {
+      document.payment_method = document.document_payment_method;
     }
     if (document.bill_payment_type || document.bill_advance_percentage || document.bill_payment_due_date || document.bill_payment_terms_text) {
       document.payment_terms = {

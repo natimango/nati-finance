@@ -15,7 +15,11 @@ function authFetch(url, options = {}) {
 }
 
 function getCategory(doc) {
-    return doc.bill_category || doc.category || doc.document_category || doc.gemini_data?.category || '—';
+    return doc.bill_category
+        || doc.document_category
+        || doc.category
+        || doc.gemini_data?.category
+        || '—';
 }
 
 function getCategoryGroup(doc) {
@@ -46,8 +50,8 @@ function setSelectValue(id, value, fallback = '') {
 }
 
 function getPayment(doc) {
-    // Payment should come directly from the chosen method on upload/manual save
-    return doc.bill_payment_method || doc.payment_method || doc.document_payment_method || '—';
+    // Use manual/approved payment first, then the original upload selection
+    return doc.bill_payment_method || doc.document_payment_method || doc.payment_method || '—';
 }
 
 function getDocDate(doc) {
@@ -889,7 +893,7 @@ function populateManualForm(doc, billLineItems) {
     const rawBillDate = doc.bill_date || gemData.bill_date || '';
     document.getElementById('manual-bill-date').value = rawBillDate ? rawBillDate.split('T')[0] : '';
 
-    const manualCat = doc.bill_category || doc.category || doc.document_category || getCategory(doc);
+    const manualCat = doc.bill_category || doc.document_category || doc.category || getCategory(doc);
     setSelectValue('manual-category', (manualCat && manualCat !== '—') ? manualCat : 'misc', 'misc');
 
     const subtotalGuess = (doc.bill_subtotal ?? doc.subtotal ?? amounts.subtotal) || '';
@@ -902,7 +906,7 @@ function populateManualForm(doc, billLineItems) {
     const totalGuess = (doc.bill_total_amount ?? doc.total_amount ?? amounts.total) || '';
     document.getElementById('manual-total').value = totalGuess;
 
-    const payMethod = doc.bill_payment_method || doc.payment_method || doc.document_payment_method || getPayment(doc);
+    const payMethod = doc.bill_payment_method || doc.document_payment_method || doc.payment_method || getPayment(doc);
     setSelectValue('manual-payment-method', (payMethod && payMethod !== '—') ? payMethod : '', '');
 
     const mergedTerms = doc.payment_terms
