@@ -15,7 +15,11 @@ function extractTotals(text) {
 }
 
 function parseAmount(line) {
-  const m = line.replace(/[,]/g, '').match(/(\d+(?:\.\d+)?)/);
+  if (!line) return 0;
+  const hasCurrency = /(?:₹|rs\.?|inr)/i.test(line);
+  if (!hasCurrency) return 0;
+  const cleaned = line.replace(/[,]/g, '');
+  const m = cleaned.match(/(\d+(?:\.\d+)?)/);
   if (!m) return 0;
   return parseFloat(m[1]);
 }
@@ -68,10 +72,26 @@ const SIMPLE_RECEIPT_RULES = [
   { type: 'tech', keywords: ['aws', 'digitalocean', 'vultr', 'vercel', 'github', 'notion', 'slack'], category: 'tech', description: 'Tech / SaaS', department: 'ops' }
 ];
 
+function extractRupeeMatches(text) {
+  const regex = /(?:₹|rs\.?|inr)\s*([\d,.]+(?:\.\d+)?)/gi;
+  const values = [];
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    const val = parseFloat(m[1].replace(/,/g, ''));
+    if (!Number.isNaN(val)) values.push(val);
+  }
+  return values;
+}
+
 function guessLargestAmount(text) {
-  const matches = text.replace(/[,₹]/g, '').match(/(\d+(?:\.\d+)?)/g);
-  if (!matches) return 0;
-  return matches.reduce((max, curr) => {
+  if (!text) return 0;
+  const rupeeValues = extractRupeeMatches(text);
+  if (rupeeValues.length > 0) {
+    return rupeeValues.reduce((max, curr) => (curr > max ? curr : max), 0);
+  }
+  const genericMatches = text.replace(/,/g, '').match(/(\d+(?:\.\d+)?)/g);
+  if (!genericMatches) return 0;
+  return genericMatches.reduce((max, curr) => {
     const val = parseFloat(curr);
     if (Number.isNaN(val)) return max;
     return val > max ? val : max;
