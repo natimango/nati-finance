@@ -11,33 +11,24 @@ async function extractBillFromText(rawText) {
     return { success: false, error: 'No raw text to extract' };
   }
 
-  const prompt = `You are an expert accountant extracting essentials from noisy OCR text.
+  const prompt = `You are an expert accountant extracting ONLY the three essentials from noisy OCR text.
 Return STRICT JSON (no markdown) with this schema:
 {
-  "vendor_name": "Company",
-  "bill_number": "Invoice/bill number or null",
+  "vendor_name": "Company or null",
   "bill_date": "YYYY-MM-DD or null",
   "amounts": {
+    "total": number,
     "subtotal": number or null,
-    "tax_amount": number or null,
-    "cgst": number or null,
-    "sgst": number or null,
-    "igst": number or null,
-    "total": number
+    "tax_amount": number or null
   },
-  "line_items": [
-    { "description": "Item", "quantity": number or null, "rate": number or null, "amount": number or null }
-  ],
-  "category": "food|travel|vendor|manufacturing|stitching|salary|rent|tech|marketing|logistics|packaging|misc|null",
-  "confidence": 0.7
+  "bill_number": "Invoice/bill number or null"
 }
 
 Rules:
-- Focus on the main invoice total; ignore stray numbers (phone, zip, IDs).
-- If multiple numbers, pick the one labeled as total/amount/INR; if unsure, use the largest plausible amount.
-- Line items OPTIONAL: include only if clearly structured; otherwise return an empty array.
-- Dates: prefer YYYY-MM-DD; if ambiguous, set null.
-- Currency: assume INR.
+- Your #1 goal is the total payable in INR; treat "Rs", "INR", "₹" as currency markers. Ignore phone numbers, IDs, quantities.
+- Vendor name should be the legal entity on the invoice header; avoid line items or contact names.
+- Bill date must be the invoice/billing date; if ambiguous, return null.
+- subtotal / tax_amount are optional hints; if not explicit, return null. No line items, categories, payment terms, etc.
 
 Raw text:
 ${rawText.slice(0, 12000)}`;
@@ -66,19 +57,6 @@ ${rawText.slice(0, 12000)}`;
     const content = data.choices?.[0]?.message?.content || '';
     const cleaned = content.replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
-
-    // Trim noisy line items
-    const total = parsed?.amounts?.total ? parseFloat(parsed.amounts.total) : 0;
-    if (parsed && Array.isArray(parsed.line_items)) {
-      let items = parsed.line_items.filter(i => i && (i.description || i.amount));
-      if (total > 0) {
-        items = items.filter(i => {
-          const amt = i.amount != null ? parseFloat(i.amount) : 0;
-          return !isNaN(amt) ? amt <= total * 1.2 : true;
-        });
-      }
-      parsed.line_items = items.slice(0, 5);
-    }
 
     return { success: true, data: parsed, provider: 'openai' };
   } catch (error) {

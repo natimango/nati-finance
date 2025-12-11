@@ -137,21 +137,15 @@ function extractWithRules(rawText) {
       totals.subtotal = lineAmount;
     }
   }
-  const normalizedCategory = simpleReceipt
-    ? { category: simpleReceipt.category, category_group: simpleReceipt.category_group }
-    : null;
-  const lineItems = simpleReceipt?.line_items || extractLineItems(rawText);
   return {
     vendor_name: vendor.vendor_name,
     bill_date: date,
-    amounts: totals,
-    line_items: lineItems,
-    category: normalizedCategory ? normalizedCategory.category : null,
-    category_group: normalizedCategory ? normalizedCategory.category_group : null,
-    department: simpleReceipt?.department || null,
-    receipt_type: simpleReceipt?.receipt_type || null,
-    payment_terms: null,
-    confidence: 0.3 // low confidence heuristic
+    amounts: {
+      subtotal: totals.subtotal || null,
+      tax_amount: totals.tax_amount || null,
+      total: totals.total || guessLargestAmount(rawText) || 0
+    },
+    bill_number: null
   };
 }
 
