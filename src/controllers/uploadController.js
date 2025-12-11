@@ -232,12 +232,43 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
     }
     
     const provider = extraction.provider || 'openai';
-    const data = { 
-      ...extraction.data, 
-      _provider: provider, 
-      _fallback: provider !== 'openai' 
+    const rawData = extraction.data || {};
+    const vendorName =
+      rawData.vendor_name ||
+      rawData.vendor ||
+      rawData.supplier ||
+      rawData.merchant ||
+      null;
+    const totalAmount = Number(
+      rawData?.amounts?.total ??
+      rawData.total_amount ??
+      rawData.amount ??
+      rawData.total ??
+      0
+    );
+
+    if (!vendorName || !totalAmount || Number.isNaN(totalAmount)) {
+      await pool.query(
+        'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
+        ['manual_required', 'AI could not extract vendor/total reliably', document.document_id]
+      );
+      return;
+    }
+
+    const data = {
+      vendor_name: vendorName,
+      bill_number: rawData.bill_number || null,
+      bill_date: rawData.bill_date || null,
+      amounts: {
+        subtotal: totalAmount,
+        tax_amount: 0,
+        total: totalAmount
+      },
+      payment_terms: null,
+      _provider: provider,
+      _fallback: provider !== 'openai'
     };
-    console.log('✓ Extracted:', data.vendor_name, '₹' + data.amounts?.total);
+    console.log('✓ Extracted:', data.vendor_name, '₹' + data.amounts.total);
 
     // Respect user-selected category first; AI suggestion only fills gaps
     const chosenCategory = document.document_category || data.category || 'misc';
@@ -251,7 +282,7 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
     
     // Normalize payment and drop
     const effectivePayment = paymentMethod || document.payment_method || 'UNSPECIFIED';
-    const dropName = data.drop_name || document.drop_name || null;
+    const dropName = document.drop_name || null;
 
     // Update document with extracted data
     await pool.query(
