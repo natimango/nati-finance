@@ -9,6 +9,38 @@ const MAX_CALLS_PER_MIN = parseInt(process.env.MAX_AI_CALLS_PER_MIN || '8', 10);
 const MAX_OCR_LENGTH = parseInt(process.env.MAX_AI_OCR_LENGTH || '12000', 10);
 const AI_PROVIDER = (process.env.AI_PROVIDER || 'openai').toLowerCase();
 
+function reconcileExtraction(result, heuristic) {
+  if (!result || !result.success || !result.data || !heuristic) return result;
+  const data = { ...result.data };
+
+  if (heuristic.vendor_name && !data.vendor_name) {
+    data.vendor_name = heuristic.vendor_name;
+  }
+  if (heuristic.bill_date && !data.bill_date) {
+    data.bill_date = heuristic.bill_date;
+  }
+
+  const heurAmounts = heuristic.amounts || {};
+  const heurTotal = Number(heurAmounts.total || 0);
+  if (heurTotal > 0) {
+    data.amounts = data.amounts || {};
+    const aiTotal = Number(data.amounts.total || 0);
+    const aiMissing = !aiTotal || aiTotal <= 0;
+    const diff = aiMissing ? 0 : Math.abs(aiTotal - heurTotal) / Math.max(heurTotal, 1);
+    if (aiMissing || diff > 0.25) {
+      data.amounts.total = heurTotal;
+      if (!data.amounts.subtotal && heurAmounts.subtotal) {
+        data.amounts.subtotal = heurAmounts.subtotal;
+      }
+      if (!data.amounts.tax_amount && heurAmounts.tax_amount) {
+        data.amounts.tax_amount = heurAmounts.tax_amount;
+      }
+    }
+  }
+
+  return { ...result, data };
+}
+
 function shouldSkipAI(ocrText) {
   if (!ocrText || ocrText.length < 10) return { block: true, reason: 'No OCR text' };
   if (ocrText.length > MAX_OCR_LENGTH) return { block: true, reason: 'OCR too long' };
@@ -95,7 +127,7 @@ async function parseInvoiceText(ocrText, opts = {}) {
     if (!throttled || !heuristicOk) {
       markCall();
       const oai = await extractOpenAI(ocrText || '');
-      if (oai && oai.success) return wrap(oai, 'openai', false);
+      if (oai && oai.success) return reconcileExtraction(wrap(oai, 'openai', false), heuristic);
     }
   }
 
