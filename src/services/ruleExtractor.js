@@ -1,76 +1,101 @@
 // Very lightweight heuristic extractor as fallback when AI is unavailable
-const { normalizeCategory } = require('../utils/categoryMap');
+const KEYWORDS_TOTAL = /(grand\s+total|total\b|amount\s+due|amount\s+payable|net\s+amount|bill\s+amount)/i;
+const KEYWORDS_VENDOR_HINT = /(gstin|bill\s+to|invoice\s+to|vendor|supplier|merchant|shop|petrol pump)/i;
 
-function extractTotals(text) {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  let total = 0, tax = 0, subtotal = 0;
-  for (const line of lines) {
-    const amount = parseAmount(line);
-    if (/grand total|total amount|amount due/i.test(line)) total = amount || total;
-    if (/tax|gst|vat/i.test(line)) tax = amount || tax;
-    if (/subtotal|sub total/i.test(line)) subtotal = amount || subtotal;
+function tokenize(text) {
+  return text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+}
+
+function extractVendorCandidates(lines) {
+  const candidates = [];
+  for (let i = 0; i < Math.min(lines.length, 10); i += 1) {
+    const line = lines[i];
+    if (!line) continue;
+    if (/invoice|bill|total|amount|gst|pan|date|qty|price|cash memo/i.test(line)) continue;
+    if (/\d/.test(line) && !KEYWORDS_VENDOR_HINT.test(line)) continue;
+    candidates.push(line.substring(0, 120));
   }
-  if (!subtotal && total && tax) subtotal = total - tax;
-  return { subtotal, tax_amount: tax, total };
+  if (candidates.length === 0 && lines.length) {
+    candidates.push(lines[0].substring(0, 120));
+  }
+  return [...new Set(candidates)].filter(Boolean);
 }
 
-function parseAmount(line) {
-  if (!line) return 0;
-  const hasCurrency = /(?:₹|rs\.?|inr)/i.test(line);
-  if (!hasCurrency) return 0;
-  const cleaned = line.replace(/[,]/g, '');
-  const m = cleaned.match(/(\d+(?:\.\d+)?)/);
-  if (!m) return 0;
-  return parseFloat(m[1]);
-}
-
-function extractVendor(text) {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const first = lines[0] || '';
-  return { vendor_name: first.substring(0, 120) || null };
-}
-
-function extractDates(text) {
-  const re = /(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/;
-  const m = text.match(re);
-  if (!m) return null;
-  return normalizeDate(m[0]);
+function extractDateCandidates(text) {
+  const regex = /(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/g;
+  const matches = [];
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    const normalized = normalizeDate(m[0]);
+    if (normalized) matches.push(normalized);
+  }
+  return [...new Set(matches)];
 }
 
 function normalizeDate(str) {
-  const parts = str.replace(/[^0-9/.-]/g, '').split(/[-/\.]/).map(p => parseInt(p, 10));
-  if (parts.length === 3) {
-    let [a, b, c] = parts;
+  const cleaned = str.replace(/[^0-9/.-]/g, '');
+  const parts = cleaned.split(/[-/\.]/).map(p => parseInt(p, 10)).filter(n => !Number.isNaN(n));
+  if (parts.length !== 3) return null;
+  let [a, b, c] = parts;
+  if (a > 1900) {
     if (c < 100) c += 2000;
-    // decide if format is yyyy-mm-dd or dd-mm-yyyy
-    if (a > 1900) return `${a}-${pad(b)}-${pad(c)}`; // a=year
-    if (c > 1900) return `${c}-${pad(b)}-${pad(a)}`; // c=year at end
+    return `${a}-${pad(b)}-${pad(c)}`;
+  }
+  if (c > 1900) {
+    if (c < 100) c += 2000;
+    return `${c}-${pad(b)}-${pad(a)}`;
   }
   return null;
 }
 
-function pad(n) { return String(n).padStart(2, '0'); }
-
-function extractLineItems(text) {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  // simple heuristic: lines with numbers and text
-  const items = [];
-  lines.forEach(l => {
-    const amt = parseAmount(l);
-    if (amt > 0 && /[a-zA-Z]/.test(l)) {
-      items.push({ description: l.slice(0, 80), quantity: 1, rate: amt, amount: amt });
-    }
-  });
-  return items.slice(0, 10);
+function pad(n) {
+  return String(n).padStart(2, '0');
 }
 
-const SIMPLE_RECEIPT_RULES = [
-  { type: 'fuel', keywords: ['petrol', 'diesel', 'bharat petroleum', 'indian oil', 'hpcl', 'fuel surcharge'], category: 'travel', description: 'Fuel purchase', department: 'ops' },
-  { type: 'cab', keywords: ['uber', 'ola', 'rapido', 'meru', 'ola money', 'ride id'], category: 'travel', description: 'Cab / ride expense', department: 'ops' },
-  { type: 'flight', keywords: ['air india', 'indigo', 'vistara', 'airasia', 'go air', 'flight', 'air ticket', 'boarding pass', 'pnr'], category: 'travel', description: 'Flight / air ticket', department: 'ops' },
-  { type: 'food', keywords: ['restaurant', 'swiggy', 'zomato', 'ubereats', 'cafe', 'hotel bill', 'meal', 'food'], category: 'food_meals', description: 'Food & meals', department: 'product' },
-  { type: 'tech', keywords: ['aws', 'digitalocean', 'vultr', 'vercel', 'github', 'notion', 'slack'], category: 'tech', description: 'Tech / SaaS', department: 'ops' }
-];
+function extractCurrencyCandidates(lines) {
+  const candidates = [];
+  lines.forEach((line, index) => {
+    if (!line) return;
+    const cleanedLine = line.replace(/\s+/g, ' ');
+    const hasCurrency = /₹|rs\.?|inr/i.test(cleanedLine);
+    const hasKeyword = KEYWORDS_TOTAL.test(cleanedLine);
+    if (!hasCurrency && !hasKeyword) return;
+
+    const matches = cleanedLine.replace(/[,]/g, '').match(/(\d+(?:\.\d+)?)/g);
+    if (!matches) return;
+    matches.forEach(numStr => {
+      const value = parseFloat(numStr);
+      if (Number.isNaN(value) || value <= 0) return;
+      candidates.push({
+        value,
+        line: cleanedLine,
+        index,
+        hasCurrency,
+        hasKeyword
+      });
+    });
+  });
+  return candidates.sort((a, b) => {
+    if (a.hasKeyword !== b.hasKeyword) return a.hasKeyword ? -1 : 1;
+    if (a.hasCurrency !== b.hasCurrency) return a.hasCurrency ? -1 : 1;
+    if (a.value !== b.value) return b.value - a.value;
+    return a.index - b.index;
+  });
+}
+
+function pickBestTotal(candidates, text) {
+  if (candidates.length > 0) {
+    return candidates.find(c => c.hasCurrency && c.hasKeyword)
+      || candidates.find(c => c.hasCurrency)
+      || candidates[0];
+  }
+  const guessed = guessLargestAmount(text);
+  if (!guessed) return null;
+  return { value: guessed, line: '', index: -1, hasCurrency: false, hasKeyword: false };
+}
 
 function extractRupeeMatches(text) {
   const regex = /(?:₹|rs\.?|inr)\s*([\d,.]+(?:\.\d+)?)/gi;
@@ -101,51 +126,45 @@ function guessLargestAmount(text) {
 function detectSimpleReceipt(rawText, totals) {
   if (!rawText) return null;
   const lower = rawText.toLowerCase();
-  const rule = SIMPLE_RECEIPT_RULES.find(pattern =>
+  const patterns = [
+    { type: 'fuel', keywords: ['petrol', 'diesel', 'bharat petroleum', 'indian oil', 'hpcl'] },
+    { type: 'cab', keywords: ['uber', 'ola', 'rapido', 'meru'] },
+    { type: 'flight', keywords: ['air india', 'indigo', 'vistara', 'pnr'] }
+  ];
+  return patterns.find(pattern =>
     pattern.keywords.some(keyword => lower.includes(keyword))
-  );
-  if (!rule) return null;
-  const normalized = normalizeCategory(rule.category);
-  const totalAmount = totals.total || totals.subtotal || guessLargestAmount(rawText) || 0;
-  return {
-    ...normalized,
-    department: rule.department || null,
-    receipt_type: rule.type,
-    is_simple_receipt: true,
-    line_items: [{
-      description: rule.description,
-      quantity: 1,
-      rate: totalAmount,
-      amount: totalAmount,
-      sku_code: ''
-    }]
-  };
+  ) || null;
 }
 
 function extractWithRules(rawText) {
   if (!rawText || rawText.length < 10) return null;
-  const totals = extractTotals(rawText);
-  const vendor = extractVendor(rawText);
-  const date = extractDates(rawText);
-  const simpleReceipt = detectSimpleReceipt(rawText, totals);
-  if (simpleReceipt && simpleReceipt.line_items && simpleReceipt.line_items.length) {
-    const lineAmount = simpleReceipt.line_items[0].amount || 0;
-    if ((!totals.total || totals.total === 0) && lineAmount) {
-      totals.total = lineAmount;
-    }
-    if ((!totals.subtotal || totals.subtotal === 0) && lineAmount) {
-      totals.subtotal = lineAmount;
-    }
-  }
+  const lines = tokenize(rawText);
+  const vendorCandidates = extractVendorCandidates(lines);
+  const dateCandidates = extractDateCandidates(rawText);
+  const currencyCandidates = extractCurrencyCandidates(lines);
+  const bestTotal = pickBestTotal(currencyCandidates, rawText);
+  const simplePattern = detectSimpleReceipt(rawText, { total: bestTotal?.value || 0 });
+  const totalValue = bestTotal?.value || 0;
+
   return {
-    vendor_name: vendor.vendor_name,
-    bill_date: date,
+    vendor_name: vendorCandidates[0] || null,
+    vendor_candidates: vendorCandidates,
+    bill_date: dateCandidates[0] || null,
+    date_candidates: dateCandidates,
     amounts: {
-      subtotal: totals.subtotal || null,
-      tax_amount: totals.tax_amount || null,
-      total: totals.total || guessLargestAmount(rawText) || 0
+      subtotal: null,
+      tax_amount: null,
+      total: totalValue
     },
-    bill_number: null
+    total_candidates: currencyCandidates.map(c => ({
+      value: c.value,
+      line: c.line,
+      index: c.index,
+      hasCurrency: c.hasCurrency,
+      hasKeyword: c.hasKeyword
+    })),
+    bill_number: null,
+    receipt_hint: simplePattern?.type || null
   };
 }
 

@@ -94,8 +94,13 @@ async function parseInvoiceText(ocrText, opts = {}) {
   if (provider === 'openai') {
     if (!throttled || !heuristicOk) {
       markCall();
-      const oai = await extractOpenAI(ocrText || '');
-      if (oai && oai.success) return wrap(oai, 'openai', false);
+      const oai = await extractOpenAI(ocrText || '', {
+        hints: heuristic || undefined
+      });
+      if (oai && oai.success) {
+        const merged = mergeAiAndHeuristic(oai.data, heuristic);
+        return wrap({ success: true, data: merged }, 'openai', false);
+      }
     }
   }
 
@@ -116,3 +121,27 @@ async function parseInvoiceText(ocrText, opts = {}) {
 }
 
 module.exports = { parseInvoiceText };
+
+function mergeAiAndHeuristic(aiData, heuristic) {
+  if (!aiData && !heuristic) return null;
+  const result = aiData ? { ...aiData } : {};
+  if (heuristic) {
+    result._hints = {
+      vendor_candidates: heuristic.vendor_candidates || [],
+      total_candidates: heuristic.total_candidates || [],
+      date_candidates: heuristic.date_candidates || [],
+      receipt_hint: heuristic.receipt_hint || null
+    };
+    if ((!result.vendor_name || result.vendor_name === 'null') && heuristic.vendor_name) {
+      result.vendor_name = heuristic.vendor_name;
+    }
+    if ((!result.bill_date || result.bill_date === 'null') && heuristic.bill_date) {
+      result.bill_date = heuristic.bill_date;
+    }
+    const aiTotal = result?.amounts?.total;
+    if ((aiTotal === undefined || aiTotal === null || aiTotal === 0) && heuristic.amounts?.total) {
+      result.amounts = { ...(result.amounts || {}), total: heuristic.amounts.total };
+    }
+  }
+  return result;
+}
