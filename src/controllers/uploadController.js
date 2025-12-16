@@ -261,6 +261,17 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
       fileType: document.file_type
     });
     
+    if (!extraction.success && rawText) {
+      const ruleFallback = extractWithRules(rawText);
+      if (ruleFallback && ruleFallback.vendor_name && ruleFallback.amounts?.total) {
+        extraction = {
+          success: true,
+          provider: 'rule',
+          data: ruleFallback
+        };
+      }
+    }
+
     if (!extraction.success) {
       console.error('AI extraction failed:', extraction.error);
       await pool.query(
@@ -270,8 +281,19 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
       return;
     }
     
-    const provider = extraction.provider || 'openai';
+    let provider = extraction.provider || 'openai';
     const rawData = extraction.data || {};
+    if ((!rawData.vendor_name || !rawData.amounts?.total) && rawText) {
+      const heuristics = extractWithRules(rawText);
+      if (heuristics && heuristics.vendor_name && heuristics.amounts?.total) {
+        rawData.vendor_name = rawData.vendor_name || heuristics.vendor_name;
+        rawData.bill_date = rawData.bill_date || heuristics.bill_date;
+        rawData.amounts = rawData.amounts || {};
+        rawData.amounts.total = rawData.amounts.total || heuristics.amounts.total;
+        rawData.amounts.subtotal = rawData.amounts.subtotal || heuristics.amounts.subtotal;
+        provider = provider === 'openai' ? 'hybrid' : 'rule';
+      }
+    }
     const vendorName =
       rawData.vendor_name ||
       rawData.vendor ||
