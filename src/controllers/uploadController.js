@@ -42,21 +42,21 @@ const storage = multer.diskStorage({
 const fileFilter = (req, file, cb) => {
   const allowedTypes = /jpeg|jpg|png|pdf|xlsx|xls|doc|docx/;
   const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  
+
   const allowedMimeTypes = [
     'image/jpeg', 'image/jpg', 'image/png', 'application/pdf',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     'application/vnd.ms-excel', 'application/msword',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   ];
-  
-  const mimetype = allowedMimeTypes.includes(file.mimetype);
-  
-  if (mimetype && extname) {
+
+  const mimetypeAllowed = allowedMimeTypes.includes(file.mimetype);
+  const isOctetStream = file.mimetype === 'application/octet-stream';
+
+  if (extname && (mimetypeAllowed || isOctetStream)) {
     return cb(null, true);
-  } else {
-    cb(new Error('Only PDF, JPG, PNG, Excel, and Word files allowed!'));
   }
+  cb(new Error('Only PDF, JPG, PNG, Excel, and Word files allowed!'));
 };
 
 const upload = multer({
@@ -159,6 +159,21 @@ const uploadBill = async (req, res) => {
       }
     } catch (err) {
       console.error('Preprocess error:', err.message);
+      // Attempt to coerce PDF if MIME is ambiguous
+      if (file.mimetype === 'application/octet-stream' && path.extname(file.path).toLowerCase() === '.pdf') {
+        try {
+          const pre = await preprocessFile(file.path, 'application/pdf');
+          rawText = pre.raw_text || '';
+          if (rawText) {
+            await pool.query('UPDATE documents SET gemini_data = $1 WHERE document_id = $2', [
+              JSON.stringify({ raw_text: rawText, preprocess_meta: pre.meta || {} }),
+              document.document_id
+            ]);
+          }
+        } catch (pdfErr) {
+          console.error('Fallback PDF preprocess failed:', pdfErr.message);
+        }
+      }
     }
 
     // 3. AUTO-PROCESS with AI abstraction (background)
