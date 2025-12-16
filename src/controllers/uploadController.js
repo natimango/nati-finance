@@ -314,7 +314,7 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
          (document_id, vendor_id, bill_number, bill_date, subtotal, tax_amount, total_amount, 
           category, category_group, drop_name, confidence_score, status, payment_status, payment_method)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       ON CONFLICT (document_id) DO UPDATE SET
+       ON CONFLICT ON CONSTRAINT ux_bills_document DO UPDATE SET
           vendor_id = EXCLUDED.vendor_id,
           bill_number = EXCLUDED.bill_number,
           bill_date = EXCLUDED.bill_date,

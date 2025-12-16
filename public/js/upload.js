@@ -59,13 +59,20 @@ function handleFile(file) {
         'application/msword', // .doc
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document' // .docx
     ];
+    const allowedExtensions = ['pdf', 'jpg', 'jpeg', 'png', 'xlsx', 'xls', 'doc', 'docx'];
+    const fileExtension = (file.name || '').split('.').pop().toLowerCase();
     
     if (file.size > maxSize) {
         showMessage('File too large. Maximum size is 25MB.', 'error');
         return;
     }
     
-    if (!allowedTypes.includes(file.type)) {
+    if (!allowedExtensions.includes(fileExtension)) {
+        showMessage('Invalid file type. Only PDF, JPG, PNG, Excel (XLS/XLSX), and Word (DOC/DOCX) are allowed.', 'error');
+        return;
+    }
+
+    if (!allowedTypes.includes(file.type) && file.type !== 'application/octet-stream') {
         showMessage('Invalid file type. Only PDF, JPG, PNG, Excel (XLS/XLSX), and Word (DOC/DOCX) are allowed.', 'error');
         return;
     }
@@ -95,12 +102,17 @@ function displayFileInfo(file) {
 
 function getFileIconInfo(mimeType, fileName) {
     // PDF
-    if (mimeType.includes('pdf')) {
+    if (mimeType.includes('pdf') || fileName.toLowerCase().endsWith('.pdf')) {
         return { icon: 'fa-file-pdf', color: 'text-red-500', label: 'PDF' };
     }
     
     // Images
-    if (mimeType.includes('image')) {
+    if (
+        mimeType.includes('image') ||
+        fileName.toLowerCase().endsWith('.jpg') ||
+        fileName.toLowerCase().endsWith('.jpeg') ||
+        fileName.toLowerCase().endsWith('.png')
+    ) {
         return { icon: 'fa-file-image', color: 'text-blue-500', label: 'Image' };
     }
     
