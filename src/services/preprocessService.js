@@ -1,7 +1,16 @@
 const fs = require('fs');
 const path = require('path');
 const pdfParseModule = require('pdf-parse');
-const pdfParse = pdfParseModule?.default || pdfParseModule;
+const PDFParseClass =
+  pdfParseModule?.PDFParse ||
+  pdfParseModule?.default?.PDFParse ||
+  null;
+const legacyPdfParseFn =
+  typeof pdfParseModule === 'function'
+    ? pdfParseModule
+    : typeof pdfParseModule?.default === 'function'
+      ? pdfParseModule.default
+      : null;
 const XLSX = require('xlsx');
 const mammoth = require('mammoth');
 const { createWorker } = require('tesseract.js');
@@ -105,14 +114,50 @@ async function parseDoc(filePath) {
 
 async function parsePdf(filePath) {
   const buffer = fs.readFileSync(filePath);
-  const data = await pdfParse(buffer);
-  if (data && data.text && data.text.trim().length > 10) {
-    const trimmed = data.text.trim();
-    const quality = assessTextQuality(trimmed);
-    if (quality.score >= 0.5) {
-      return { raw_text: trimmed, meta: { type: 'pdf', pages: data.numpages, quality } };
+  // Try new v2 parser API if available
+  if (PDFParseClass) {
+    try {
+      const parser = new PDFParseClass({ data: buffer });
+      let result;
+      try {
+        result = await parser.getText();
+      } finally {
+        await parser.destroy().catch(() => {});
+      }
+      if (result?.text) {
+        const trimmed = result.text.trim();
+        if (trimmed.length > 10) {
+          const quality = assessTextQuality(trimmed);
+          return {
+            raw_text: trimmed,
+            meta: { type: 'pdf_parse_v2', pages: result?.total, quality }
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[preprocess] pdf-parse v2 getText failed, falling back to legacy parser', err);
     }
   }
+
+  // Legacy pdf-parse v1 style function
+  if (legacyPdfParseFn) {
+    try {
+      const data = await legacyPdfParseFn(buffer);
+      if (data?.text) {
+        const trimmed = data.text.trim();
+        if (trimmed.length > 10) {
+          const quality = assessTextQuality(trimmed);
+          return {
+            raw_text: trimmed,
+            meta: { type: 'pdf_parse_v1', pages: data?.numpages, quality }
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[preprocess] pdf-parse legacy function failed, falling back to OCR', err);
+    }
+  }
+
   // fallback: render pages and OCR
   const pageBuffers = await renderPdfToImages(filePath, 3);
   let combined = '';
