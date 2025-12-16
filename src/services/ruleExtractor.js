@@ -1,6 +1,20 @@
 // Very lightweight heuristic extractor as fallback when AI is unavailable
 const KEYWORDS_TOTAL = /(grand\s+total|total\b|amount\s+due|amount\s+payable|net\s+amount|bill\s+amount)/i;
 const KEYWORDS_VENDOR_HINT = /(gstin|bill\s+to|invoice\s+to|vendor|supplier|merchant|shop|petrol pump)/i;
+const MONTHS = {
+  january: 1, jan: 1,
+  february: 2, feb: 2,
+  march: 3, mar: 3,
+  april: 4, apr: 4,
+  may: 5,
+  june: 6, jun: 6,
+  july: 7, jul: 7,
+  august: 8, aug: 8,
+  september: 9, sep: 9, sept: 9,
+  october: 10, oct: 10,
+  november: 11, nov: 11,
+  december: 12, dec: 12
+};
 
 function tokenize(text) {
   return text
@@ -25,17 +39,30 @@ function extractVendorCandidates(lines) {
 }
 
 function extractDateCandidates(text) {
-  const regex = /(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/g;
   const matches = [];
+  const numericRegex = /(\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2})|(\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})/g;
   let m;
-  while ((m = regex.exec(text)) !== null) {
-    const normalized = normalizeDate(m[0]);
+  while ((m = numericRegex.exec(text)) !== null) {
+    const normalized = normalizeNumericDate(m[0]);
     if (normalized) matches.push(normalized);
   }
+
+  const textRegex1 = /(\d{1,2})(?:st|nd|rd|th)?\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(?:,?\s*)?(\d{2,4})/gi;
+  while ((m = textRegex1.exec(text)) !== null) {
+    const normalized = normalizeTextualDate(m[1], m[2], m[3]);
+    if (normalized) matches.push(normalized);
+  }
+
+  const textRegex2 = /(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*)?(\d{2,4})/gi;
+  while ((m = textRegex2.exec(text)) !== null) {
+    const normalized = normalizeTextualDate(m[2], m[1], m[3]);
+    if (normalized) matches.push(normalized);
+  }
+
   return [...new Set(matches)];
 }
 
-function normalizeDate(str) {
+function normalizeNumericDate(str) {
   const cleaned = str.replace(/[^0-9/.-]/g, '');
   const parts = cleaned.split(/[-/\.]/).map(p => parseInt(p, 10)).filter(n => !Number.isNaN(n));
   if (parts.length !== 3) return null;
@@ -49,6 +76,20 @@ function normalizeDate(str) {
     return `${c}-${pad(b)}-${pad(a)}`;
   }
   return null;
+}
+
+function normalizeTextualDate(dayStr, monthStr, yearStr) {
+  if (!dayStr || !monthStr || !yearStr) return null;
+  const day = parseInt(dayStr.replace(/\D/g, ''), 10);
+  if (Number.isNaN(day) || day < 1 || day > 31) return null;
+  const monthKey = monthStr.toLowerCase();
+  const month = MONTHS[monthKey];
+  if (!month) return null;
+  let year = parseInt(yearStr, 10);
+  if (Number.isNaN(year)) return null;
+  if (year < 100) year += 2000;
+  if (year < 1900 || year > 2100) return null;
+  return `${year}-${pad(month)}-${pad(day)}`;
 }
 
 function pad(n) {
