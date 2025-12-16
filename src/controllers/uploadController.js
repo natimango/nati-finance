@@ -3,6 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { preprocessFile } = require('../services/preprocessService');
+const mime = require('mime-types');
 const sharp = require('sharp');
 const { extractWithRules } = require('../services/ruleExtractor');
 const { parseInvoiceText } = require('../services/aiParser');
@@ -50,10 +51,17 @@ const fileFilter = (req, file, cb) => {
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   ];
 
-  const mimetypeAllowed = allowedMimeTypes.includes(file.mimetype);
-  const isOctetStream = file.mimetype === 'application/octet-stream';
+  const guessedMime = mime.lookup(file.originalname) || '';
+  const incomingMime = file.mimetype || '';
+  const normalizedMime = incomingMime === 'application/octet-stream'
+    ? (guessedMime || incomingMime)
+    : incomingMime || guessedMime;
 
-  if (extname && (mimetypeAllowed || isOctetStream)) {
+  const mimetypeAllowed = allowedMimeTypes.includes(normalizedMime);
+  const allowOctet = incomingMime === 'application/octet-stream';
+  const allowUnknown = !incomingMime && guessedMime && allowedMimeTypes.includes(guessedMime);
+
+  if (extname && (mimetypeAllowed || allowOctet || allowUnknown)) {
     return cb(null, true);
   }
   cb(new Error('Only PDF, JPG, PNG, Excel, and Word files allowed!'));
@@ -123,6 +131,22 @@ const uploadBill = async (req, res) => {
     }
     if (!paymentMethod || paymentMethod === 'UNSPECIFIED') {
       return res.status(400).json({ error: 'payment_method is required' });
+    }
+
+    if (file && (!file.mimetype || file.mimetype === 'application/octet-stream')) {
+      const guessed = mime.lookup(file.originalname);
+      if (guessed) {
+        file.mimetype = guessed;
+      } else {
+        const lower = file.originalname.toLowerCase();
+        if (lower.endsWith('.pdf')) file.mimetype = 'application/pdf';
+        else if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) file.mimetype = 'image/jpeg';
+        else if (lower.endsWith('.png')) file.mimetype = 'image/png';
+        else if (lower.endsWith('.xlsx')) file.mimetype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        else if (lower.endsWith('.xls')) file.mimetype = 'application/vnd.ms-excel';
+        else if (lower.endsWith('.docx')) file.mimetype = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        else if (lower.endsWith('.doc')) file.mimetype = 'application/msword';
+      }
     }
     
     await optimizeImage(file);

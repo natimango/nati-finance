@@ -72,7 +72,7 @@ function handleFile(file) {
         return;
     }
 
-    if (!allowedTypes.includes(file.type) && file.type !== 'application/octet-stream') {
+    if (file.type && file.type !== 'application/octet-stream' && !allowedTypes.includes(file.type)) {
         showMessage('Invalid file type. Only PDF, JPG, PNG, Excel (XLS/XLSX), and Word (DOC/DOCX) are allowed.', 'error');
         return;
     }
