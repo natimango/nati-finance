@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const pdfParse = require('pdf-parse');
+const pdfParseModule = require('pdf-parse');
+const pdfParse = pdfParseModule?.default || pdfParseModule;
 const XLSX = require('xlsx');
 const mammoth = require('mammoth');
 const { createWorker } = require('tesseract.js');
