@@ -23,12 +23,20 @@ async function extractBillFromText(rawText, options = {}) {
   const vendorHintBlock = formatHintList('Vendor candidates', hints.vendor_candidates);
   if (vendorHintBlock) hintSections.push(vendorHintBlock);
   const totalHintBlock = formatHintList('Likely totals', hints.total_candidates, c => {
-    if (!c || typeof c.value === 'undefined') return null;
-    const source = c.line ? ` (from "${c.line.slice(0, 80)}")` : '';
-    return `${c.value}${source}`;
+    if (!c) return null;
+    const value = typeof c === 'number' ? c : c.value;
+    if (typeof value === 'undefined' || value === null) return null;
+    const evidence = c.line || c.evidence;
+    const source = evidence ? ` (from "${evidence.slice(0, 80)}")` : '';
+    return `${value}${source}`;
   });
   if (totalHintBlock) hintSections.push(totalHintBlock);
-  const dateHintBlock = formatHintList('Possible billing dates', hints.date_candidates);
+  const dateCandidates = hints.bill_date_candidates || hints.date_candidates;
+  const dateHintBlock = formatHintList('Possible billing dates', dateCandidates, c => {
+    if (!c) return null;
+    if (typeof c === 'string') return c;
+    return c.value || null;
+  });
   if (dateHintBlock) hintSections.push(dateHintBlock);
   if (hints.receipt_hint) {
     hintSections.push(`- Receipt type hint: ${hints.receipt_hint}`);
@@ -38,24 +46,35 @@ async function extractBillFromText(rawText, options = {}) {
     ? `\nAdditional context (use only if it matches the text):\n${hintSections.join('')}`
     : '';
 
-  const prompt = `You are an expert accountant extracting ONLY the three essentials from noisy OCR text.
+  const prompt = `You are an expert accountant extracting verification-ready metadata from noisy OCR text.
 Return STRICT JSON (no markdown) with this schema:
 {
   "vendor_name": "Company or null",
-  "bill_date": "YYYY-MM-DD or null",
-  "amounts": {
-    "total": number,
-    "subtotal": number or null,
-    "tax_amount": number or null
+  "bill_number": "Invoice/bill number or null",
+  "bill_date": {
+    "value": "YYYY-MM-DD or null",
+    "confidence": 0-1,
+    "evidence": "Exact quote from the text or null"
   },
-  "bill_number": "Invoice/bill number or null"
+  "total_amount": {
+    "value": number or null,
+    "confidence": 0-1,
+    "evidence": "Exact quote from the text or null"
+  },
+  "subtotal": number or null,
+  "tax_amount": number or null,
+  "quality_score": 0-100,
+  "reason": "Why a field is missing/uncertain or null"
 }
 
 Rules:
 - Your #1 goal is the total payable in INR; treat "Rs", "INR", "₹" as currency markers. Ignore phone numbers, IDs, quantities.
 - Vendor name should be the legal entity on the invoice header; avoid line items or contact names.
 - Bill date must be the invoice/billing date; if ambiguous, return null.
-- subtotal / tax_amount are optional hints; if not explicit, return null. No line items, categories, payment terms, etc.
+- subtotal / tax_amount are optional hints; if not explicit, return null.
+- Evidence must be a verbatim snippet from the OCR text (≤140 chars). If no precise quote exists, set evidence to null.
+- Confidence is your certainty that the evidence proves the field; use 0 if value is null.
+- Do NOT include markdown fences or prose outside the JSON object.
 
 ${hintText}
 

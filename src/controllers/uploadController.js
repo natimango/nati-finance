@@ -2,6 +2,7 @@ const pool = require('../config/database');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { preprocessFile } = require('../services/preprocessService');
 const mime = require('mime-types');
 const sharp = require('sharp');
@@ -9,6 +10,8 @@ const { extractWithRules } = require('../services/ruleExtractor');
 const { parseInvoiceText } = require('../services/aiParser');
 const { normalizeCategory } = require('../utils/categoryMap');
 const { safeParseJSON } = require('../utils/json');
+const { storeRawText, getRawTextFromDoc } = require('../utils/ocrCache');
+const { logDocumentFieldChange } = require('../utils/documentAudit');
 
 const uploadDir = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -16,6 +19,9 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 const DEFAULT_JOURNAL_USER_ID = parseInt(process.env.SYSTEM_USER_ID || '1', 10);
+const REQUIRED_OCR_VERSION = parseInt(process.env.OCR_VERSION || '1', 10);
+const MIN_OCR_TEXT_LENGTH = Math.max(parseInt(process.env.OCR_TEXT_MIN_LEN || '200', 10), 32);
+const VERIFY_CONF_THRESHOLD = Math.min(Math.max(parseFloat(process.env.VERIFY_CONF_THRESHOLD || '0.85'), 0.5), 0.99);
 
 function resolveJournalUser(preferred) {
   return preferred || DEFAULT_JOURNAL_USER_ID;
@@ -101,6 +107,16 @@ async function optimizeImage(file) {
   }
 }
 
+function computeFileHash(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
 // Upload and AUTO-PROCESS with AI
 const uploadBill = async (req, res) => {
   try {
@@ -141,6 +157,7 @@ const uploadBill = async (req, res) => {
     }
     
     await optimizeImage(file);
+    const fileHash = await computeFileHash(file.path);
 
     // 1. Save to documents table
     const docResult = await pool.query(
@@ -157,6 +174,7 @@ const uploadBill = async (req, res) => {
       payment_method: paymentMethod,
       drop_name: dropName
     };
+    await pool.query('UPDATE documents SET file_hash = $1 WHERE document_id = $2', [fileHash, document.document_id]);
 
     // 2. Preprocess (OCR/text extraction) and store raw text
     let rawText = '';
@@ -166,25 +184,14 @@ const uploadBill = async (req, res) => {
       await pool.query('UPDATE documents SET notes = COALESCE(notes, $1) WHERE document_id = $2', [
         `Preprocessed (${pre.meta?.type || 'unknown'})`, document.document_id
       ]);
-      if (rawText) {
-        await pool.query('UPDATE documents SET gemini_data = $1 WHERE document_id = $2', [
-          JSON.stringify({ raw_text: rawText, preprocess_meta: pre.meta || {} }),
-          document.document_id
-        ]);
-      }
+      await storeRawText(document.document_id, rawText, pre.meta || {}, { fileHash });
     } catch (err) {
       console.error('Preprocess error:', err.message);
-      // Attempt to coerce PDF if MIME is ambiguous
       if (file.mimetype === 'application/octet-stream' && path.extname(file.path).toLowerCase() === '.pdf') {
         try {
           const pre = await preprocessFile(file.path, 'application/pdf');
           rawText = pre.raw_text || '';
-          if (rawText) {
-            await pool.query('UPDATE documents SET gemini_data = $1 WHERE document_id = $2', [
-              JSON.stringify({ raw_text: rawText, preprocess_meta: pre.meta || {} }),
-              document.document_id
-            ]);
-          }
+          await storeRawText(document.document_id, rawText, pre.meta || {}, { fileHash });
         } catch (pdfErr) {
           console.error('Fallback PDF preprocess failed:', pdfErr.message);
         }
@@ -192,7 +199,13 @@ const uploadBill = async (req, res) => {
     }
 
     // 3. AUTO-PROCESS with AI abstraction (background)
-    processDocumentWithAI(document, rawText, paymentMethod);
+    processDocumentWithAI(document, rawText, paymentMethod)
+      .then(result => {
+        if (result && result.success === false) {
+          console.warn('Background AI skipped:', result.reason || result.error);
+        }
+      })
+      .catch(err => console.error('Background AI processing failed:', err));
     
     res.json({
       success: true,
@@ -223,58 +236,434 @@ function hasActionablePaymentTerms(terms) {
   return hasDueDate || hasNet;
 }
 
+function normalizeISODate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function normalizeHeuristicCandidates(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return { value: entry, evidence: null };
+    }
+    return entry;
+  });
+}
+
+function buildExtractionState({ provider, heuristics, aiSummary, appliedEvidence }) {
+  const heuristicBlock = heuristics ? {
+    vendor_candidates: heuristics.vendor_candidates || [],
+    bill_date_candidates: normalizeHeuristicCandidates(
+      heuristics.bill_date_candidates || heuristics.date_candidates || []
+    ),
+    total_candidates: normalizeHeuristicCandidates(heuristics.total_candidates || []),
+    receipt_hint: heuristics.receipt_hint || null,
+    flags: heuristics.flags || null
+  } : null;
+
+  const aiBlock = aiSummary ? {
+    vendor_name: aiSummary.vendor_name || null,
+    bill_number: aiSummary.bill_number || null,
+    bill_date: aiSummary.bill_date || null,
+    total_amount: aiSummary.total_amount || null,
+    subtotal: aiSummary.subtotal != null ? aiSummary.subtotal : null,
+    tax_amount: aiSummary.tax_amount != null ? aiSummary.tax_amount : null,
+    quality_score: aiSummary.quality_score != null ? aiSummary.quality_score : null,
+    reason: aiSummary.reason || null,
+    confidence: (aiSummary.total_amount && aiSummary.total_amount.confidence != null)
+      ? aiSummary.total_amount.confidence
+      : (aiSummary.bill_date && aiSummary.bill_date.confidence != null
+        ? aiSummary.bill_date.confidence
+        : (aiSummary.confidence || null))
+  } : null;
+
+  return {
+    run_at: new Date().toISOString(),
+    provider,
+    heuristics: heuristicBlock,
+    ai: aiBlock,
+    applied: appliedEvidence || null
+  };
+}
+
+function computeQualityScore({ vendorName, billDate, totalAmount }) {
+  let score = 0;
+  if (vendorName) score += 25;
+  if (billDate) score += 35;
+  if (totalAmount && totalAmount > 0) score += 40;
+  if (score > 100) return 100;
+  return score;
+}
+
+function asNumberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  if (Number.isNaN(num)) return null;
+  return num;
+}
+
+function sanitizeSnippet(snippet) {
+  if (!snippet) return null;
+  const normalized = snippet.toString().replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+  return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
+}
+
+function determineFieldSource({ value, locked, manualFlag, provider, aiHasValue, heuristicHasValue }) {
+  if ((locked && value) || manualFlag) return 'manual';
+  if (aiHasValue) {
+    if (!provider) return 'ai';
+    if (provider === 'rule' || provider === 'heuristic') return 'heuristic';
+    if (provider === 'manual') return 'manual';
+    return provider;
+  }
+  if (heuristicHasValue) return 'heuristic';
+  if (value) return 'stored';
+  return null;
+}
+
+function formatCurrencyValue(value) {
+  const amount = asNumberOrNull(value);
+  if (amount === null) return null;
+  return `₹${amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+}
+
+function normalizeAiField(field) {
+  if (!field) {
+    return { value: null, confidence: null, evidence: null };
+  }
+  if (typeof field === 'object') {
+    return {
+      value: field.value ?? null,
+      confidence: field.confidence != null ? Number(field.confidence) : null,
+      evidence: field.evidence || null
+    };
+  }
+  return {
+    value: field,
+    confidence: null,
+    evidence: null
+  };
+}
+
+function buildDateEvidence(aiState, heuristics) {
+  const aiField = normalizeAiField(aiState?.bill_date);
+  if (aiField.value) {
+    const conf = aiField.confidence != null
+      ? ` (${Math.round(aiField.confidence * 100)}% conf.)`
+      : '';
+    const snippet = sanitizeSnippet(aiField.evidence || aiField.value);
+    return `AI → ${snippet}${conf}`.trim();
+  }
+  const candidates = Array.isArray(heuristics?.bill_date_candidates)
+    ? heuristics.bill_date_candidates
+    : Array.isArray(heuristics?.date_candidates)
+      ? heuristics.date_candidates
+      : [];
+  if (candidates.length > 0) {
+    const first = candidates[0];
+    if (first && typeof first === 'object') {
+      const snippet = sanitizeSnippet(first.evidence || first.value);
+      return `Heuristic → ${snippet}`;
+    }
+    return `Heuristic → ${sanitizeSnippet(first)}`;
+  }
+  return null;
+}
+
+function buildTotalEvidence(aiState, heuristics) {
+  const aiField = normalizeAiField(aiState?.total_amount || aiState?.total);
+  if (aiField.value != null) {
+    const currency = formatCurrencyValue(aiField.value) || aiField.value;
+    const confidence = aiField.confidence != null
+      ? ` (${Math.round(Number(aiField.confidence) * 100)}% conf.)`
+      : '';
+    const snippet = sanitizeSnippet(aiField.evidence);
+    const suffix = snippet ? ` | ${snippet}` : '';
+    return `AI → ${currency}${confidence}${suffix}`.trim();
+  }
+  const candidates = Array.isArray(heuristics?.total_candidates)
+    ? heuristics.total_candidates
+    : [];
+  if (candidates.length > 0) {
+    const candidate = candidates[0];
+    const currency = formatCurrencyValue(candidate.value) || candidate.value;
+    const snippetSource = candidate.evidence || candidate.line;
+    const snippet = sanitizeSnippet(snippetSource);
+    return `Heuristic → ${currency}${snippet ? ` | ${snippet}` : ''}`;
+  }
+  return null;
+}
+
+function getHeuristicDateCandidates(heuristics) {
+  if (!heuristics) return [];
+  if (Array.isArray(heuristics.bill_date_candidates)) return heuristics.bill_date_candidates;
+  if (Array.isArray(heuristics.date_candidates)) {
+    return heuristics.date_candidates.map((value) => {
+      if (!value || typeof value === 'object') return value;
+      return { value, evidence: value, confidence: null };
+    });
+  }
+  return [];
+}
+
+function pickBestDateCandidate(heuristics) {
+  const candidates = getHeuristicDateCandidates(heuristics);
+  if (!candidates.length) return null;
+  const first = candidates[0];
+  if (!first) return null;
+  if (typeof first === 'object') return first;
+  return { value: first, evidence: first, confidence: null };
+}
+
+function pickBestTotalCandidate(heuristics) {
+  if (!heuristics || !Array.isArray(heuristics.total_candidates)) return null;
+  const [first] = heuristics.total_candidates;
+  if (!first) return null;
+  if (typeof first === 'object') return first;
+  return { value: asNumberOrNull(first), evidence: first, confidence: null };
+}
+
+function normalizeSearchableText(text) {
+  if (!text) return '';
+  return text.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function evidenceMatchesText(evidence, normalizedText) {
+  if (!evidence || !normalizedText) return false;
+  const snippet = evidence.toString().toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!snippet || snippet.length < 3) return false;
+  return normalizedText.includes(snippet);
+}
+
+function canUseAiCandidate(candidate, normalizedText, threshold) {
+  if (!candidate || candidate.value === null || candidate.value === undefined) return false;
+  if (candidate.confidence === null || candidate.confidence === undefined) return false;
+  if (candidate.confidence < threshold) return false;
+  if (!candidate.evidence) return false;
+  return evidenceMatchesText(candidate.evidence, normalizedText);
+}
+
+function resolveVerificationReason({ hasBillDate, hasTotal, qualityScore, aiConfidence, heuristics }) {
+  const heuristicFlags = heuristics?.flags || {};
+  if (!hasBillDate && !hasTotal) return 'Missing date & total';
+  if (!hasBillDate) {
+    if (heuristicFlags.ambiguousDate || (Array.isArray(heuristics?.bill_date_candidates) && heuristics.bill_date_candidates.length > 1)) {
+      return 'Ambiguous date';
+    }
+    return 'Missing bill date';
+  }
+  if (!hasTotal) {
+    if (heuristicFlags.ambiguousTotal || heuristicFlags.multipleTotals || (Array.isArray(heuristics?.total_candidates) && heuristics.total_candidates.length > 1)) {
+      return 'Ambiguous total';
+    }
+    return 'Missing total';
+  }
+  if (qualityScore != null && qualityScore < 60) return 'Low quality';
+  if (aiConfidence != null && aiConfidence < 0.5) return 'Low AI confidence';
+  return null;
+}
+
+function buildVerificationSnapshot(row = {}) {
+  const geminiData = (row.gemini_data && typeof row.gemini_data === 'object')
+    ? row.gemini_data
+    : safeParseJSON(row.gemini_data) || {};
+  const extractionState = (row.extraction_state && typeof row.extraction_state === 'object')
+    ? row.extraction_state
+    : safeParseJSON(row.extraction_state) || {};
+  const heuristics = extractionState?.heuristics || {};
+  const aiState = extractionState?.ai || {};
+  const aiBillDateField = normalizeAiField(aiState?.bill_date);
+  const aiTotalField = normalizeAiField(aiState?.total_amount || aiState?.total);
+  const provider = (extractionState?.provider || '').toLowerCase();
+  const manualFlag = Boolean(extractionState?.manual || geminiData?.manual);
+
+  const storedBillDate = row.bill_date || geminiData?.bill_date || null;
+  let storedTotal = row.total_amount != null
+    ? asNumberOrNull(row.total_amount)
+    : asNumberOrNull(geminiData?.amounts?.total);
+  if (storedTotal === null && row.bill_total_amount != null) {
+    storedTotal = asNumberOrNull(row.bill_total_amount);
+  }
+
+  const hasBillDate = Boolean(storedBillDate);
+  const hasTotal = storedTotal != null && storedTotal > 0;
+  const lockedDate = Boolean(row.bill_date_locked);
+  const lockedTotal = Boolean(row.total_locked);
+  const qualityScore = asNumberOrNull(row.quality_score);
+  const aiConfidence = asNumberOrNull(
+    aiState?.confidence != null
+      ? aiState.confidence
+      : (aiTotalField.confidence != null
+        ? aiTotalField.confidence
+        : aiBillDateField.confidence)
+  );
+  const docStatus = (row.status || '').toLowerCase();
+  const storedStatus = (row.verification_status || '').toLowerCase();
+  const hasRawText = Boolean(row.raw_text);
+
+  const storedReason = row.verification_reason || null;
+  const reason = storedReason || resolveVerificationReason({
+    hasBillDate,
+    hasTotal,
+    qualityScore,
+    aiConfidence,
+    heuristics
+  });
+
+  const isProcessing = !hasRawText || !['processed', 'manual_required'].includes(docStatus);
+  let status;
+  if (isProcessing) {
+    status = 'processing';
+  } else if (hasBillDate && hasTotal && (lockedDate || lockedTotal || storedStatus === 'verified')) {
+    status = 'verified';
+  } else if (
+    reason ||
+    storedStatus === 'needs_review' ||
+    storedStatus === 'failed' ||
+    (!hasBillDate || !hasTotal)
+  ) {
+    status = 'needs_review';
+  } else {
+    status = storedStatus || 'unverified';
+  }
+
+  const billDateSource = determineFieldSource({
+    value: storedBillDate,
+    locked: lockedDate,
+    manualFlag,
+    provider,
+    aiHasValue: Boolean(aiBillDateField.value),
+    heuristicHasValue: Array.isArray(heuristics?.bill_date_candidates) && heuristics.bill_date_candidates.length > 0
+  });
+
+  const totalSource = determineFieldSource({
+    value: storedTotal,
+    locked: lockedTotal,
+    manualFlag,
+    provider,
+    aiHasValue: aiTotalField.value != null,
+    heuristicHasValue: Array.isArray(heuristics?.total_candidates) && heuristics.total_candidates.length > 0
+  });
+
+  return {
+    status,
+    quality_score: qualityScore != null ? qualityScore : null,
+    bill_date_locked: lockedDate,
+    total_locked: lockedTotal,
+    bill_date_source: billDateSource,
+    total_source: totalSource,
+    bill_date_evidence: buildDateEvidence(aiState, heuristics),
+    total_evidence: buildTotalEvidence(aiState, heuristics),
+    reason: status === 'needs_review' ? reason : null
+  };
+}
+
 // Background AI processing with accounting entries
-async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMethod = 'UNSPECIFIED') {
+async function processDocumentWithAI(
+  document,
+  rawTextFromPreprocess,
+  paymentMethod = 'UNSPECIFIED',
+  actorContext = {}
+) {
+  const actorType = actorContext.actorType || 'system';
+  const actorId = actorContext.actorId || null;
+  const docBillDateLocked = Boolean(document.bill_date_locked);
+  const docTotalLocked = Boolean(document.total_locked);
+
   try {
     console.log(`\n🤖 AI Processing: ${document.file_name}`);
     const manualGemini = safeParseJSON(document.gemini_data);
     if (manualGemini?.manual) {
       console.log(`Skipping AI for document ${document.document_id} because it has a manual override.`);
-      return;
+      return { success: false, reason: 'manual_override' };
     }
-    const existingBillCheck = await pool.query(
-      'SELECT confidence_score FROM bills WHERE document_id = $1',
+
+    const existingBillResult = await pool.query(
+      `SELECT bill_id, bill_date, total_amount, confidence_score, payment_status,
+              bill_date_locked, total_locked
+         FROM bills
+        WHERE document_id = $1
+        LIMIT 1`,
       [document.document_id]
     );
-    const hasManualLock = existingBillCheck.rows.some(row => parseFloat(row.confidence_score || 0) >= 0.99);
+    const existingBill = existingBillResult.rows[0] || null;
+    const hasManualLock = existingBill && parseFloat(existingBill.confidence_score || 0) >= 0.99;
     if (hasManualLock) {
       console.log(`Skipping AI for document ${document.document_id} because a manual bill already exists.`);
-      return;
+      return { success: false, reason: 'manual_locked' };
     }
-    let rawText = rawTextFromPreprocess;
 
-    // If we have no usable text, try preprocessing again
-    if (!rawText || rawText.length < 10) {
+    let rawText = rawTextFromPreprocess || getRawTextFromDoc(document);
+    const currentOcrVersion = parseInt(document.ocr_version || '0', 10);
+    let needsFreshOcr = false;
+    if (!rawText || rawText.length < MIN_OCR_TEXT_LENGTH) {
+      needsFreshOcr = true;
+    }
+    if (currentOcrVersion < REQUIRED_OCR_VERSION) {
+      needsFreshOcr = true;
+    }
+    let computedFileHash = null;
+    if (document.file_path && document.file_hash && !needsFreshOcr) {
+      try {
+        computedFileHash = await computeFileHash(document.file_path);
+        if (computedFileHash !== document.file_hash) {
+          needsFreshOcr = true;
+        }
+      } catch (hashErr) {
+        console.error('File hash compute failed:', hashErr.message);
+      }
+    } else if (document.file_path && !document.file_hash) {
+      needsFreshOcr = true;
+    }
+
+    if (needsFreshOcr && document.file_path) {
+      try {
+        if (!computedFileHash) {
+          computedFileHash = await computeFileHash(document.file_path);
+        }
+      } catch (hashErr) {
+        console.error('File hash recompute failed:', hashErr.message);
+      }
       try {
         const pre = await preprocessFile(document.file_path, document.file_type);
         rawText = pre.raw_text || '';
+        if (rawText) {
+          await storeRawText(document.document_id, rawText, pre.meta || {}, { fileHash: computedFileHash });
+        }
       } catch (err) {
         console.error('Re-preprocess error:', err.message);
       }
     }
 
-    if (!rawText || rawText.length < 10) {
+    if (!rawText || rawText.length < Math.max(50, Math.floor(MIN_OCR_TEXT_LENGTH * 0.5))) {
       await pool.query(
         'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
         ['manual_required', 'OCR text missing; manual review needed', document.document_id]
       );
-      return;
+      return { success: false, reason: 'missing_ocr' };
     }
-    
+
+    const heuristicsSeed = rawText ? extractWithRules(rawText) : null;
     let extraction = await parseInvoiceText(rawText, {
       filePath: document.file_path,
-      fileType: document.file_type
+      fileType: document.file_type,
+      heuristics: heuristicsSeed
     });
-    
-    if (!extraction.success && rawText) {
-      const ruleFallback = extractWithRules(rawText);
-      if (ruleFallback && ruleFallback.vendor_name && ruleFallback.amounts?.total) {
-        extraction = {
-          success: true,
-          provider: 'rule',
-          data: ruleFallback
-        };
-      }
+
+    if (!extraction.success && heuristicsSeed && heuristicsSeed.amounts?.total) {
+      extraction = {
+        success: true,
+        provider: 'rule',
+        fallback: true,
+        data: { ...heuristicsSeed },
+        heuristics: heuristicsSeed,
+        aiSummary: null
+      };
     }
 
     if (!extraction.success) {
@@ -283,69 +672,104 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
         'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
         ['manual_required', 'AI extraction failed, manual processing needed', document.document_id]
       );
-      return;
+      return { success: false, reason: 'ai_failed', error: extraction.error };
     }
-    
+
     let provider = extraction.provider || 'openai';
+    const heuristics = extraction.heuristics || heuristicsSeed || null;
+    const aiSummary = extraction.aiSummary || null;
     const rawData = extraction.data || {};
-    if (rawText) {
-      const heuristics = extractWithRules(rawText);
-      if (heuristics) {
-        if (!rawData.vendor_name && heuristics.vendor_name) {
-          rawData.vendor_name = heuristics.vendor_name;
-        }
-        if (!rawData.bill_date && heuristics.bill_date) {
-          rawData.bill_date = heuristics.bill_date;
-        }
-        if (!rawData.amounts?.total && heuristics.amounts?.total) {
-          rawData.amounts = rawData.amounts || {};
-          rawData.amounts.total = heuristics.amounts.total;
-          rawData.amounts.subtotal = rawData.amounts.subtotal || heuristics.amounts.subtotal;
-          provider = provider === 'openai' ? 'hybrid' : 'rule';
-        }
-      }
-    }
+    rawData.amounts = rawData.amounts || { subtotal: null, tax_amount: null, total: null };
+
     const vendorName =
       rawData.vendor_name ||
       rawData.vendor ||
       rawData.supplier ||
       rawData.merchant ||
       null;
-    const totalAmount = Number(
-      rawData?.amounts?.total ??
-      rawData.total_amount ??
-      rawData.amount ??
-      rawData.total ??
-      0
-    );
 
-    if (!totalAmount || Number.isNaN(totalAmount) || totalAmount <= 0) {
+    const normalizedRawText = normalizeSearchableText(rawText);
+    const heuristicDate = pickBestDateCandidate(heuristics);
+    const heuristicTotal = pickBestTotalCandidate(heuristics);
+    const aiBillDateCandidate = aiSummary ? normalizeAiField(aiSummary.bill_date) : { value: null, confidence: null, evidence: null };
+    const aiTotalCandidate = aiSummary ? normalizeAiField(aiSummary.total_amount) : { value: null, confidence: null, evidence: null };
+
+    const previousBillDate = normalizeISODate(existingBill?.bill_date);
+    const previousTotal = existingBill && existingBill.total_amount != null
+      ? Number(existingBill.total_amount)
+      : null;
+    const billDateLocked = docBillDateLocked || Boolean(existingBill?.bill_date_locked);
+    const billTotalLocked = docTotalLocked || Boolean(existingBill?.total_locked);
+
+    const fieldEvidence = {
+      bill_date: null,
+      total_amount: null
+    };
+
+    let resolvedBillDate = previousBillDate || rawData.bill_date || document.bill_date || null;
+    if (!billDateLocked) {
+      if (canUseAiCandidate(aiBillDateCandidate, normalizedRawText, VERIFY_CONF_THRESHOLD)) {
+        resolvedBillDate = aiBillDateCandidate.value;
+        fieldEvidence.bill_date = { source: 'ai', evidence: aiBillDateCandidate.evidence, confidence: aiBillDateCandidate.confidence };
+      } else if (!resolvedBillDate && heuristicDate?.value) {
+        resolvedBillDate = heuristicDate.value;
+        fieldEvidence.bill_date = { source: 'heuristic', evidence: heuristicDate.evidence || heuristicDate.value, confidence: heuristicDate.confidence || null };
+      }
+    } else if (previousBillDate) {
+      resolvedBillDate = previousBillDate;
+    }
+
+    let resolvedTotal = previousTotal != null
+      ? Number(previousTotal)
+      : asNumberOrNull(rawData?.amounts?.total ?? rawData.total_amount ?? rawData.total);
+
+    if (!billTotalLocked) {
+      if (canUseAiCandidate(aiTotalCandidate, normalizedRawText, VERIFY_CONF_THRESHOLD)) {
+        resolvedTotal = asNumberOrNull(aiTotalCandidate.value);
+        fieldEvidence.total_amount = { source: 'ai', evidence: aiTotalCandidate.evidence, confidence: aiTotalCandidate.confidence };
+      } else if (!resolvedTotal && heuristicTotal?.value) {
+        resolvedTotal = asNumberOrNull(heuristicTotal.value);
+        fieldEvidence.total_amount = { source: 'heuristic', evidence: heuristicTotal.evidence || heuristicTotal.line, confidence: heuristicTotal.confidence || null };
+      }
+    } else if (previousTotal != null) {
+      resolvedTotal = Number(previousTotal);
+    }
+
+    if (!resolvedTotal || Number.isNaN(resolvedTotal) || resolvedTotal <= 0) {
       await pool.query(
         'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
         ['manual_required', 'AI could not extract total amount reliably', document.document_id]
       );
-      return;
+      return { success: false, reason: 'missing_total' };
     }
 
-    const finalBillDate = rawData.bill_date || document.bill_date || null;
     const finalVendorName = vendorName || document.vendor_name || document.bill_vendor_name || null;
 
     const data = {
       vendor_name: finalVendorName,
       bill_number: rawData.bill_number || null,
-      bill_date: finalBillDate,
+      bill_date: resolvedBillDate,
       amounts: {
-        subtotal: rawData?.amounts?.subtotal || totalAmount,
+        subtotal: rawData?.amounts?.subtotal || resolvedTotal,
         tax_amount: rawData?.amounts?.tax_amount || 0,
-        total: totalAmount
+        total: resolvedTotal
       },
-      payment_terms: null,
+      payment_terms: rawData.payment_terms || null,
+      confidence: rawData.confidence
+        || aiTotalCandidate.confidence
+        || aiBillDateCandidate.confidence
+        || null,
       _provider: provider,
       _fallback: provider !== 'openai'
     };
-    console.log('✓ Extracted:', data.vendor_name, '₹' + data.amounts.total);
 
-    // Respect user-selected category first; AI suggestion only fills gaps
+    const aiUsedField = (fieldEvidence.bill_date?.source === 'ai') || (fieldEvidence.total_amount?.source === 'ai');
+    if (provider === 'openai' && !aiUsedField) {
+      provider = 'hybrid';
+      data._provider = 'hybrid';
+      data._fallback = true;
+    }
+
     const chosenCategory =
       document.document_category ||
       data.category ||
@@ -355,27 +779,73 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
     data.category = categoryInfo.category;
     data.category_group = categoryInfo.category_group;
     const effectiveCategory = categoryInfo.category;
-    if (!['fabric', 'manufacturing'].includes(effectiveCategory)) {
-      if (data.line_items) delete data.line_items;
+    if (!['fabric', 'manufacturing'].includes(effectiveCategory) && data.line_items) {
+      delete data.line_items;
     }
-    
-    // Normalize payment and drop
+
     const effectivePayment = paymentMethod || document.payment_method || 'UNSPECIFIED';
     const dropName = document.drop_name || null;
 
-    // Update document with extracted data
+    const appliedEvidence = {
+      bill_date: {
+        value: resolvedBillDate,
+        source: fieldEvidence.bill_date?.source || (billDateLocked ? 'locked' : 'stored'),
+        evidence: fieldEvidence.bill_date?.evidence || null,
+        confidence: fieldEvidence.bill_date?.confidence || null
+      },
+      total_amount: {
+        value: resolvedTotal,
+        source: fieldEvidence.total_amount?.source || (billTotalLocked ? 'locked' : 'stored'),
+        evidence: fieldEvidence.total_amount?.evidence || null,
+        confidence: fieldEvidence.total_amount?.confidence || null
+      }
+    };
+
+    const aiSnapshot = aiSummary ? {
+      vendor_name: aiSummary.vendor_name || null,
+      bill_number: aiSummary.bill_number || null,
+      bill_date: aiSummary.bill_date || null,
+      total_amount: aiSummary.total_amount || null,
+      subtotal: aiSummary.subtotal != null ? aiSummary.subtotal : null,
+      tax_amount: aiSummary.tax_amount != null ? aiSummary.tax_amount : null,
+      quality_score: aiSummary.quality_score != null ? aiSummary.quality_score : null,
+      reason: aiSummary.reason || null
+    } : null;
+
+    const extractionState = buildExtractionState({
+      provider,
+      heuristics,
+      aiSummary: aiSnapshot,
+      appliedEvidence
+    });
+
+    const qualityScore = computeQualityScore({
+      vendorName: data.vendor_name,
+      billDate: resolvedBillDate,
+      totalAmount: resolvedTotal
+    });
+    const hasBillDate = Boolean(resolvedBillDate);
+    const hasTotal = resolvedTotal != null && resolvedTotal > 0;
+    const aiConfidence = aiTotalCandidate.confidence || aiBillDateCandidate.confidence || data.confidence || null;
+    const verificationReason = resolveVerificationReason({
+      hasBillDate,
+      hasTotal,
+      qualityScore,
+      aiConfidence,
+      heuristics
+    });
+    const verificationStatus = (hasBillDate && hasTotal && !verificationReason) ? 'unverified' : 'needs_review';
+
     await pool.query(
-      'UPDATE documents SET gemini_data = $1, status = $2 WHERE document_id = $3',
-      [JSON.stringify(data), 'processed', document.document_id]
+      'UPDATE documents SET gemini_data = $1, status = $2, extraction_state = $3, quality_score = $4, verification_status = $5, verification_reason = $6 WHERE document_id = $7',
+      [JSON.stringify(data), 'processed', JSON.stringify(extractionState), qualityScore, verificationStatus, verificationReason, document.document_id]
     );
-    
-    // Create/update vendor
+
     let vendorId = null;
     if (finalVendorName) {
       vendorId = await createOrUpdateVendor(data);
     }
-    
-    // Upsert bill for this document
+
     const billUpsert = await pool.query(
       `INSERT INTO bills 
          (document_id, vendor_id, bill_number, bill_date, subtotal, tax_amount, total_amount, 
@@ -395,25 +865,70 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
           status = EXCLUDED.status,
           payment_status = EXCLUDED.payment_status,
           payment_method = EXCLUDED.payment_method
-       RETURNING bill_id`,
+       RETURNING bill_id, bill_date, total_amount`,
       [
-        document.document_id, vendorId, data.bill_number || null, data.bill_date || document.bill_date || null,
-        data.amounts?.subtotal || 0, data.amounts?.tax_amount || 0, data.amounts?.total || 0,
+        document.document_id,
+        vendorId,
+        data.bill_number || null,
+        resolvedBillDate || document.bill_date || null,
+        data.amounts?.subtotal || 0,
+        data.amounts?.tax_amount || 0,
+        resolvedTotal || 0,
         data.category || document.document_category || 'misc',
         categoryInfo.category_group,
         dropName,
         data.confidence || 0.8,
-        'approved', 'pending', effectivePayment
+        'approved',
+        'pending',
+        effectivePayment
       ]
     );
     const billId = billUpsert.rows[0].bill_id;
-    
-    // Replace line items
+    const updatedBillDate = normalizeISODate(billUpsert.rows[0].bill_date || resolvedBillDate);
+    const updatedTotal = Number(billUpsert.rows[0].total_amount ?? resolvedTotal);
+
+    if (!billDateLocked && updatedBillDate) {
+      const billDateEvidence = fieldEvidence.bill_date?.evidence
+        || heuristicDate?.evidence
+        || heuristics?.date_candidates?.[0]
+        || updatedBillDate;
+      const billDateReason = fieldEvidence.bill_date?.source === 'heuristic' ? 'heuristic_extract' : 'ai_extract';
+      const billDateConfidence = fieldEvidence.bill_date?.confidence || data.confidence || null;
+      await logDocumentFieldChange({
+        documentId: document.document_id,
+        fieldName: 'bill_date',
+        oldValue: previousBillDate,
+        newValue: updatedBillDate,
+        actorType: 'ai',
+        actorId,
+        reason: billDateReason,
+        confidence: billDateConfidence,
+        evidence: billDateEvidence
+      });
+    }
+    if (!billTotalLocked && updatedTotal && updatedTotal !== previousTotal) {
+      const totalEvidence = fieldEvidence.total_amount?.evidence
+        || heuristicTotal?.evidence
+        || heuristics?.total_candidates?.[0]?.line
+        || updatedTotal;
+      const totalReason = fieldEvidence.total_amount?.source === 'heuristic' ? 'heuristic_extract' : 'ai_extract';
+      const totalConfidence = fieldEvidence.total_amount?.confidence || data.confidence || null;
+      await logDocumentFieldChange({
+        documentId: document.document_id,
+        fieldName: 'total_amount',
+        oldValue: previousTotal,
+        newValue: updatedTotal,
+        actorType: 'ai',
+        actorId,
+        reason: totalReason,
+        confidence: totalConfidence,
+        evidence: totalEvidence
+      });
+    }
+
     await pool.query('DELETE FROM bill_items WHERE bill_id = $1', [billId]);
-    
-    // Save line items
     if (data.line_items && data.line_items.length > 0) {
-      for (let i = 0; i < data.line_items.length; i++) {
+      for (let i = 0; i < data.line_items.length; i += 1) {
         const item = data.line_items[i];
         await pool.query(
           `INSERT INTO bill_items (bill_id, description, quantity, unit_price, amount, line_number)
@@ -422,32 +937,31 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
         );
       }
     }
-    
-    // Create payment terms/schedule and determine payment status
+
     const scheduleCreated = await createPaymentSchedule(billId, {
       bill_date: data.bill_date || document.bill_date,
-      amounts: data.amounts || { total: data.total_amount || 0 },
+      amounts: data.amounts || { total: persistedTotal || 0 },
       payment_terms: data.payment_terms
     });
     const paymentStatus = scheduleCreated ? 'pending' : 'paid';
     await pool.query('UPDATE bills SET payment_status = $1 WHERE bill_id = $2', [paymentStatus, billId]);
-    
-    // 🎯 CREATE ACCOUNTING ENTRIES (Double Entry)
+
     await createAccountingEntries(
       billId,
       data,
       vendorId,
       { createdBy: resolveJournalUser(document.uploaded_by) }
     );
-    
+
     console.log('✅ Complete: Bill recorded with accounting entries\n');
-    
+    return { success: true, bill_id: billId, vendor_id: vendorId, document_id: document.document_id };
   } catch (error) {
     console.error('AI Processing error:', error);
     await pool.query(
       'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
       ['manual_required', 'AI extraction failed, manual processing needed', document.document_id]
     );
+    return { success: false, error: error.message };
   }
 }
 
@@ -664,6 +1178,7 @@ const getDocuments = async (req, res) => {
         b.bill_date,
         COALESCE(b.category, d.document_category) AS category,
         b.total_amount,
+        b.total_amount AS bill_total_amount,
         b.category AS bill_category,
         b.category_group,
         COALESCE(b.payment_method, d.payment_method) AS payment_method,
@@ -722,11 +1237,13 @@ const getDocuments = async (req, res) => {
         };
       }
       const ownsDoc = row.uploaded_by === userId;
+      const verification = buildVerificationSnapshot(row);
       return {
         ...row,
         can_delete: canManageAll || ownsDoc,
         can_manual: canManageAll,
-        can_process: canManageAll
+        can_process: canManageAll,
+        verification
       };
     });
 
@@ -815,6 +1332,9 @@ const getDocument = async (req, res) => {
         description: document.bill_payment_terms_text || null
       };
     }
+    const verification = buildVerificationSnapshot(document);
+    document.verification = verification;
+
     let lineItems = [];
     if (document.bill_id) {
       const itemsResult = await pool.query(
@@ -836,6 +1356,71 @@ const getDocument = async (req, res) => {
     });
   } catch (error) {
     console.error('Get document error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getVerificationSummary = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT 
+         d.document_id,
+         d.status,
+         d.uploaded_at,
+         d.gemini_data,
+         d.extraction_state,
+         d.quality_score,
+         d.verification_status,
+         d.raw_text,
+         d.bill_date_locked,
+         d.total_locked,
+         b.bill_date,
+         b.total_amount AS bill_total_amount
+       FROM documents d
+       LEFT JOIN bills b ON b.document_id = d.document_id`
+    );
+
+    const summary = {
+      verified: 0,
+      needs_review: 0,
+      processing: 0,
+      unverified: 0,
+      missing_date: 0,
+      missing_total: 0,
+      low_quality: 0,
+      total: result.rowCount
+    };
+
+    for (const row of result.rows) {
+      const parsedGemini = safeParseJSON(row.gemini_data);
+      if (parsedGemini) {
+        row.gemini_data = parsedGemini;
+      }
+
+      const snapshot = buildVerificationSnapshot(row);
+      summary[snapshot.status] = (summary[snapshot.status] || 0) + 1;
+
+      const gemData = row.gemini_data || {};
+      const hasBillDate = Boolean(row.bill_date || gemData.bill_date);
+      const explicitTotal = row.bill_total_amount != null ? Number(row.bill_total_amount) : null;
+      const aiTotal = gemData?.amounts?.total != null ? Number(gemData.amounts.total) : null;
+      const hasTotal = (explicitTotal != null && explicitTotal > 0) || (aiTotal != null && aiTotal > 0);
+
+      if (!hasBillDate) summary.missing_date += 1;
+      if (!hasTotal) summary.missing_total += 1;
+
+      const quality = snapshot.quality_score != null
+        ? snapshot.quality_score
+        : (row.quality_score != null ? Number(row.quality_score) : null);
+      if (quality != null && quality < 60) summary.low_quality += 1;
+    }
+
+    res.json({
+      success: true,
+      summary
+    });
+  } catch (error) {
+    console.error('Verification summary error:', error);
     res.status(500).json({ error: error.message });
   }
 };
@@ -910,6 +1495,9 @@ async function rerunAIForDocuments(req, res) {
     let flaggedManual = 0;
     for (const row of docsResult.rows) {
       const gemData = safeParseJSON(row.gemini_data);
+      if (gemData) {
+        row.gemini_data = gemData;
+      }
       const manualLocked =
         (gemData && gemData.manual === true) ||
         (row.bill_confidence && parseFloat(row.bill_confidence) >= 0.99);
@@ -917,14 +1505,21 @@ async function rerunAIForDocuments(req, res) {
         skipped += 1;
         continue;
       }
-      const rawText = gemData?.raw_text || null;
+      const rawText = getRawTextFromDoc(row);
       const effectivePayment = row.effective_payment_method || row.payment_method || 'UNSPECIFIED';
       const docPayload = {
         ...row,
         payment_method: effectivePayment,
         drop_name: row.effective_drop_name || null
       };
-      await processDocumentWithAI(docPayload, rawText, effectivePayment);
+      const result = await processDocumentWithAI(docPayload, rawText, effectivePayment, {
+        actorType: 'system',
+        actorId: req.user?.userId || null
+      });
+      if (!result || !result.success) {
+        flaggedManual += 1;
+        continue;
+      }
       processed += 1;
       const billCheck = await pool.query(
         'SELECT bill_date FROM bills WHERE document_id = $1',
@@ -961,6 +1556,8 @@ module.exports = {
   uploadBill,
   getDocuments,
   getDocument,
+  getVerificationSummary,
   deleteDocument,
-  rerunAIForDocuments
+  rerunAIForDocuments,
+  processDocumentWithAI
 };

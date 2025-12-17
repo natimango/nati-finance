@@ -17,6 +17,24 @@ const MONTHS = {
   december: 12, dec: 12
 };
 
+const SNIPPET_LIMIT = 160;
+
+function clampConfidence(value) {
+  if (Number.isNaN(value) || !Number.isFinite(value)) return 0.5;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return Number(value.toFixed(3));
+}
+
+function buildSnippet(str) {
+  if (!str) return null;
+  const normalized = str.toString().replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+  return normalized.length > SNIPPET_LIMIT
+    ? `${normalized.slice(0, SNIPPET_LIMIT - 3)}...`
+    : normalized;
+}
+
 function tokenize(text) {
   return text
     .split('\n')
@@ -39,40 +57,66 @@ function extractVendorCandidates(lines) {
   return [...new Set(candidates)].filter(Boolean);
 }
 
-function extractDateCandidates(text) {
-  const matches = [];
+function extractDetailedDateCandidates(text) {
+  if (!text) return [];
+  const seen = new Set();
+  const candidates = [];
+  const pushCandidate = (value, snippet, source, confidence, meta = {}) => {
+    if (!value) return;
+    const key = `${value}:${source}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({
+      value,
+      evidence: buildSnippet(snippet || value),
+      source,
+      confidence: clampConfidence(confidence),
+      ambiguous: Boolean(meta.ambiguous)
+    });
+  };
+
   const numericRegex = /(\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2})|(\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})/g;
   let m;
   while ((m = numericRegex.exec(text)) !== null) {
     const normalized = normalizeNumericDate(m[0]);
-    if (normalized) matches.push(normalized);
+    if (!normalized) continue;
+    const base = normalized.ambiguous ? 0.55 : 0.7;
+    pushCandidate(normalized.value, m[0], 'numeric', base, { ambiguous: normalized.ambiguous });
   }
 
   const textRegex1 = /(\d{1,2})(?:st|nd|rd|th)?\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(?:,?\s*)?(\d{2,4})/gi;
   while ((m = textRegex1.exec(text)) !== null) {
     const normalized = normalizeTextualDate(m[1], m[2], m[3]);
-    if (normalized) matches.push(normalized);
+    if (!normalized) continue;
+    pushCandidate(normalized, m[0], 'textual', 0.72);
   }
 
   const textRegex2 = /(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*)?(\d{2,4})/gi;
   while ((m = textRegex2.exec(text)) !== null) {
     const normalized = normalizeTextualDate(m[2], m[1], m[3]);
-    if (normalized) matches.push(normalized);
+    if (!normalized) continue;
+    pushCandidate(normalized, m[0], 'textual', 0.72);
   }
 
   const hyphenRegex = /(\d{1,2})[-](Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[-]'?(\d{2,4})/gi;
   while ((m = hyphenRegex.exec(text)) !== null) {
     const normalized = normalizeTextualDate(m[1], m[2], m[3]);
-    if (normalized) matches.push(normalized);
+    if (!normalized) continue;
+    pushCandidate(normalized, m[0], 'textual', 0.7);
   }
 
   const contextRegex = /(bill\s+date|invoice\s+date|dated|date\s*[:\-]|payment\s+date|paid\s+on|amount\s+paid\s+on|transaction\s+date|txn\s+date)\s*(?:[:\-]|\s)?([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})/gi;
   while ((m = contextRegex.exec(text)) !== null) {
     const normalized = normalizeNumericDate(m[2]);
-    if (normalized) matches.push(normalized);
+    if (!normalized) continue;
+    const snippet = `${m[1]} ${m[2]}`.trim();
+    pushCandidate(normalized.value, snippet, 'contextual', 0.9, { ambiguous: normalized.ambiguous });
   }
 
-  return [...new Set(matches)];
+  return candidates.sort((a, b) => {
+    if (a.confidence !== b.confidence) return b.confidence - a.confidence;
+    return a.value.localeCompare(b.value);
+  });
 }
 
 function normalizeNumericDate(str) {
@@ -95,6 +139,8 @@ function normalizeNumericDate(str) {
   let month;
   let day;
 
+  let ambiguous = false;
+
   if (a > 1900) {
     year = a;
     month = b;
@@ -107,6 +153,9 @@ function normalizeNumericDate(str) {
     year = coerceYear(c);
     if (!inRange(year)) return null;
     if (a > 12 && b <= 12) {
+      if (a <= 12 && b <= 12) {
+        ambiguous = true;
+      }
       day = a;
       month = b;
     } else if (b > 12 && a <= 12) {
@@ -114,6 +163,9 @@ function normalizeNumericDate(str) {
       month = a;
     } else {
       // Default to DD/MM layout (most Indian bills)
+      if (a <= 12 && b <= 12) {
+        ambiguous = true;
+      }
       day = a;
       month = b;
     }
@@ -123,7 +175,10 @@ function normalizeNumericDate(str) {
   if (!inRange(year)) return null;
   if (!isValidMonthDay(month, day)) return null;
 
-  return `${year}-${pad(month)}-${pad(day)}`;
+  return {
+    value: `${year}-${pad(month)}-${pad(day)}`,
+    ambiguous
+  };
 }
 
 function normalizeTextualDate(dayStr, monthStr, yearStr) {
@@ -208,17 +263,6 @@ function extractContextualAmountCandidates(text) {
   return candidates;
 }
 
-function pickBestTotal(candidates, text) {
-  if (candidates.length > 0) {
-    return candidates.find(c => c.hasCurrency && c.hasKeyword)
-      || candidates.find(c => c.hasCurrency)
-      || candidates[0];
-  }
-  const guessed = guessLargestAmount(text);
-  if (!guessed) return null;
-  return { value: guessed, line: '', index: -1, hasCurrency: false, hasKeyword: false };
-}
-
 function extractRupeeMatches(text) {
   const regex = /(?:₹|rs\.?|inr)\s*([\d,.]+(?:\.\d+)?)/gi;
   const values = [];
@@ -259,15 +303,62 @@ function detectSimpleReceipt(rawText, totals) {
   ) || null;
 }
 
+function buildTotalCandidates(rawText, lines) {
+  if (!rawText) return [];
+  const lineCurrencyCandidates = extractCurrencyCandidates(lines);
+  const contextualCandidates = extractContextualAmountCandidates(rawText);
+  const currencyCandidates = [...contextualCandidates, ...lineCurrencyCandidates];
+  const enriched = currencyCandidates.map((candidate, idx) => {
+    const snippet = buildSnippet(candidate.line);
+    const base = 0.45 + Math.max(0, 4 - idx) * 0.05;
+    const keywordBoost = candidate.hasKeyword ? 0.25 : 0;
+    const currencyBoost = candidate.hasCurrency ? 0.2 : 0;
+    const source = candidate.hasKeyword
+      ? 'keyword_line'
+      : (candidate.hasCurrency ? 'currency_line' : 'context');
+    return {
+      value: candidate.value,
+      line: candidate.line,
+      index: candidate.index,
+      hasCurrency: candidate.hasCurrency,
+      hasKeyword: candidate.hasKeyword,
+      source,
+      evidence: snippet,
+      confidence: clampConfidence(base + keywordBoost + currencyBoost)
+    };
+  });
+
+  if (enriched.length === 0) {
+    const guessed = guessLargestAmount(rawText);
+    if (guessed) {
+      enriched.push({
+        value: guessed,
+        line: '',
+        index: -1,
+        hasCurrency: false,
+        hasKeyword: false,
+        source: 'largest_number',
+        evidence: null,
+        confidence: 0.35
+      });
+    }
+  }
+
+  return enriched.sort((a, b) => {
+    if (a.confidence !== b.confidence) return b.confidence - a.confidence;
+    if (a.value !== b.value) return b.value - a.value;
+    return a.index - b.index;
+  });
+}
+
 function extractWithRules(rawText) {
   if (!rawText || rawText.length < 10) return null;
   const lines = tokenize(rawText);
   const vendorCandidates = extractVendorCandidates(lines);
-  const dateCandidates = extractDateCandidates(rawText);
-  const lineCurrencyCandidates = extractCurrencyCandidates(lines);
-  const contextualCandidates = extractContextualAmountCandidates(rawText);
-  const currencyCandidates = [...contextualCandidates, ...lineCurrencyCandidates];
-  const bestTotal = pickBestTotal(currencyCandidates, rawText);
+  const dateCandidatesDetailed = extractDetailedDateCandidates(rawText);
+  const dateCandidates = dateCandidatesDetailed.map(c => c.value);
+  const totalCandidateList = buildTotalCandidates(rawText, lines);
+  const bestTotal = totalCandidateList[0] || null;
   const simplePattern = detectSimpleReceipt(rawText, { total: bestTotal?.value || 0 });
   const totalValue = bestTotal?.value || 0;
 
@@ -276,21 +367,22 @@ function extractWithRules(rawText) {
     vendor_candidates: vendorCandidates,
     bill_date: dateCandidates[0] || null,
     date_candidates: dateCandidates,
+    bill_date_candidates: dateCandidatesDetailed,
     amounts: {
       subtotal: null,
       tax_amount: null,
       total: totalValue
     },
-    total_candidates: currencyCandidates.map(c => ({
-      value: c.value,
-      line: c.line,
-      index: c.index,
-      hasCurrency: c.hasCurrency,
-      hasKeyword: c.hasKeyword
-    })),
+    total_candidates: totalCandidateList,
     bill_number: null,
-    receipt_hint: simplePattern?.type || null
+    receipt_hint: simplePattern?.type || null,
+    flags: {
+      ambiguousDate: dateCandidatesDetailed.some(c => c.ambiguous),
+      missingDate: dateCandidatesDetailed.length === 0,
+      missingTotal: !bestTotal,
+      multipleTotals: totalCandidateList.length > 1
+    }
   };
 }
 
-module.exports = { extractWithRules };
+module.exports = { extractWithRules, extractDetailedDateCandidates, buildTotalCandidates };

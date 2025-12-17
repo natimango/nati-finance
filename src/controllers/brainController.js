@@ -1,5 +1,174 @@
 const pool = require('../config/database');
 
+const ALERT_TYPES = {
+  agedNeedsReview: 'DOC_NEEDS_REVIEW_AGED',
+  lowQuality: 'DOC_LOW_QUALITY',
+  highValue: 'DOC_HIGH_VALUE_NEEDS_REVIEW',
+  budgetVariance: 'BUDGET_VARIANCE'
+};
+const HIGH_VALUE_THRESHOLD = 5000;
+
+function formatRupees(value) {
+  const num = Number(value);
+  if (Number.isNaN(num) || num <= 0) return '₹0';
+  return `₹${num.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+}
+
+async function upsertDocumentAlert({ alertType, severity, message, documentId, billId = null, metadata = {} }) {
+  if (!documentId) return 0;
+  const existing = await pool.query(
+    `SELECT alert_id FROM alerts WHERE alert_type = $1 AND document_id = $2 AND resolved_at IS NULL LIMIT 1`,
+    [alertType, documentId]
+  );
+  if (existing.rowCount > 0) return 0;
+  await pool.query(
+    `INSERT INTO alerts (alert_type, severity, message, document_id, bill_id, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+    [alertType, severity, message, documentId, billId, JSON.stringify(metadata || {})]
+  );
+  return 1;
+}
+
+async function resolveClearedDocumentAlerts(alertType, activeDocumentIds = [], actor = 'system') {
+  await pool.query(
+    `
+    UPDATE alerts
+    SET resolved_at = NOW(),
+        resolved_by = $3
+    WHERE alert_type = $1
+      AND resolved_at IS NULL
+      AND (document_id IS NULL OR document_id <> ALL($2::int[]))
+    `,
+    [alertType, activeDocumentIds, actor]
+  );
+}
+
+async function evaluateVerificationAlerts(actor = 'system') {
+  let created = 0;
+
+  const agedResult = await pool.query(
+    `
+    WITH doc_meta AS (
+      SELECT d.document_id,
+             d.file_name,
+             d.uploaded_at,
+             d.verification_status,
+             b.bill_id,
+             COALESCE(
+               to_char(b.bill_date, 'YYYY-MM-DD'),
+               NULLIF(d.gemini_data->>'bill_date', '')
+             ) AS resolved_bill_date,
+             COALESCE(
+               b.total_amount,
+               NULLIF(REGEXP_REPLACE(COALESCE(d.gemini_data->'amounts'->>'total',''), '[^0-9.]', '', 'g'), '')::numeric
+             ) AS resolved_total
+      FROM documents d
+      LEFT JOIN bills b ON b.document_id = d.document_id
+    )
+    SELECT * FROM doc_meta
+    WHERE (verification_status = 'needs_review' OR resolved_bill_date IS NULL OR resolved_total IS NULL OR resolved_total <= 0)
+      AND uploaded_at < NOW() - INTERVAL '24 HOURS'
+    ORDER BY uploaded_at ASC
+    LIMIT 50
+    `
+  );
+  const agedIds = [];
+  for (const row of agedResult.rows) {
+    agedIds.push(row.document_id);
+    const message = `#${String(row.document_id).padStart(4, '0')} missing date/total for 24h+`;
+    created += await upsertDocumentAlert({
+      alertType: ALERT_TYPES.agedNeedsReview,
+      severity: 'warning',
+      message,
+      documentId: row.document_id,
+      billId: row.bill_id,
+      metadata: {
+        uploaded_at: row.uploaded_at,
+        bill_date: row.resolved_bill_date,
+        total_amount: row.resolved_total
+      }
+    });
+  }
+  await resolveClearedDocumentAlerts(ALERT_TYPES.agedNeedsReview, agedIds, actor);
+
+  const lowQualityResult = await pool.query(
+    `
+    SELECT d.document_id,
+           d.file_name,
+           d.quality_score,
+           d.uploaded_at,
+           d.verification_status,
+           b.bill_id
+    FROM documents d
+    LEFT JOIN bills b ON b.document_id = d.document_id
+    WHERE COALESCE(d.quality_score, 0) < 60
+      AND COALESCE(d.status, '') NOT IN ('deleted','void')
+    ORDER BY d.uploaded_at DESC
+    LIMIT 50
+    `
+  );
+  const lowQualityIds = [];
+  for (const row of lowQualityResult.rows) {
+    lowQualityIds.push(row.document_id);
+    const message = `#${String(row.document_id).padStart(4, '0')} low quality (${row.quality_score || 0})`;
+    created += await upsertDocumentAlert({
+      alertType: ALERT_TYPES.lowQuality,
+      severity: 'warning',
+      message,
+      documentId: row.document_id,
+      billId: row.bill_id,
+      metadata: {
+        uploaded_at: row.uploaded_at,
+        quality_score: row.quality_score,
+        verification_status: row.verification_status
+      }
+    });
+  }
+  await resolveClearedDocumentAlerts(ALERT_TYPES.lowQuality, lowQualityIds, actor);
+
+  const highValueResult = await pool.query(
+    `
+    WITH doc_meta AS (
+      SELECT d.document_id,
+             d.file_name,
+             d.verification_status,
+             b.bill_id,
+             COALESCE(
+               b.total_amount,
+               NULLIF(REGEXP_REPLACE(COALESCE(d.gemini_data->'amounts'->>'total',''), '[^0-9.]', '', 'g'), '')::numeric
+             ) AS resolved_total
+      FROM documents d
+      LEFT JOIN bills b ON b.document_id = d.document_id
+    )
+    SELECT * FROM doc_meta
+    WHERE verification_status = 'needs_review'
+      AND resolved_total IS NOT NULL
+      AND resolved_total >= $1
+    ORDER BY resolved_total DESC
+    LIMIT 50
+    `,
+    [HIGH_VALUE_THRESHOLD]
+  );
+  const highValueIds = [];
+  for (const row of highValueResult.rows) {
+    highValueIds.push(row.document_id);
+    const message = `#${String(row.document_id).padStart(4, '0')} needs review (${formatRupees(row.resolved_total)})`;
+    created += await upsertDocumentAlert({
+      alertType: ALERT_TYPES.highValue,
+      severity: 'critical',
+      message,
+      documentId: row.document_id,
+      billId: row.bill_id,
+      metadata: {
+        total_amount: row.resolved_total
+      }
+    });
+  }
+  await resolveClearedDocumentAlerts(ALERT_TYPES.highValue, highValueIds, actor);
+
+  return created;
+}
+
 // Finance snapshot with drops, vendors, SKU COGS, doc health.
 async function getFinanceSummary(req, res) {
   try {
@@ -342,7 +511,8 @@ async function runBudgetAlerts(req, res) {
       }
     }
 
-    res.json({ success: true, created });
+    const verificationCreated = await evaluateVerificationAlerts(actor);
+    res.json({ success: true, created: created + verificationCreated });
   } catch (err) {
     console.error('runBudgetAlerts error', err);
     res.status(500).json({ error: 'Failed to evaluate budgets' });

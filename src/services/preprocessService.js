@@ -16,6 +16,10 @@ const mammoth = require('mammoth');
 const { createWorker } = require('tesseract.js');
 const sharp = require('sharp');
 
+const CURRENT_OCR_VERSION = parseInt(process.env.OCR_VERSION || '1', 10);
+const MIN_USABLE_TEXT = parseInt(process.env.OCR_TEXT_MIN_LEN || '200', 10);
+const MAX_OCR_IMAGE_DIM = parseInt(process.env.OCR_IMAGE_MAX_DIM || '2200', 10);
+
 // Basic OCR worker singleton to avoid re-init per call
 let ocrWorker = null;
 async function getOcrWorker() {
@@ -40,13 +44,34 @@ function assessTextQuality(text) {
   return { score, reason };
 }
 
+function isUsablePdfText(text) {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.length < Math.max(80, MIN_USABLE_TEXT * 0.5)) return false;
+  const asciiOnly = trimmed.replace(/[^\x20-\x7E\n]/g, '');
+  const asciiRatio = asciiOnly.length / trimmed.length;
+  const uniqueChars = new Set(trimmed).size / Math.max(trimmed.length, 1);
+  const { score } = assessTextQuality(trimmed);
+  if (score < 0.35) return false;
+  if (asciiRatio < 0.6) return false;
+  if (uniqueChars < 0.05) return false;
+  return true;
+}
+
+function withVersion(meta = {}) {
+  return { ...meta, version: CURRENT_OCR_VERSION };
+}
+
 async function renderPdfToImages(filePath, maxPages = 2) {
   const buffers = [];
   for (let page = 0; page < maxPages; page++) {
     try {
       const buffer = await sharp(filePath, { density: 280, page })
         .ensureAlpha()
+        .grayscale()
         .normalize()
+        .sharpen()
         .toFormat('png')
         .toBuffer();
       buffers.push(buffer);
@@ -61,7 +86,7 @@ async function renderPdfToImages(filePath, maxPages = 2) {
 async function ocrBuffer(buffer) {
   const worker = await getOcrWorker();
   const { data } = await worker.recognize(buffer);
-  return { raw_text: (data.text || '').trim(), meta: { type: 'ocr', confidence: data.confidence } };
+  return { raw_text: (data.text || '').trim(), meta: withVersion({ type: 'ocr', confidence: data.confidence }) };
 }
 
 async function preprocessFile(filePath, fileType) {
@@ -91,7 +116,7 @@ async function preprocessFile(filePath, fileType) {
   }
 
   // Fallback: plain text read
-  return { raw_text: fs.readFileSync(filePath, 'utf8'), meta: { type: 'unknown' } };
+  return { raw_text: fs.readFileSync(filePath, 'utf8'), meta: withVersion({ type: 'unknown' }) };
 }
 
 async function parseExcel(filePath) {
@@ -104,12 +129,12 @@ async function parseExcel(filePath) {
     text += `\n--- SHEET: ${name} ---\n`;
     sheet.forEach(r => { text += r.join(' | ') + '\n'; });
   });
-  return { raw_text: text.trim(), meta: { type: 'excel', sheets } };
+  return { raw_text: text.trim(), meta: withVersion({ type: 'excel', sheets }) };
 }
 
 async function parseDoc(filePath) {
   const result = await mammoth.extractRawText({ path: filePath });
-  return { raw_text: result.value.trim(), meta: { type: 'docx' } };
+  return { raw_text: result.value.trim(), meta: withVersion({ type: 'docx' }) };
 }
 
 async function parsePdf(filePath) {
@@ -126,13 +151,14 @@ async function parsePdf(filePath) {
       }
       if (result?.text) {
         const trimmed = result.text.trim();
-        if (trimmed.length > 10) {
+        if (isUsablePdfText(trimmed)) {
           const quality = assessTextQuality(trimmed);
           return {
             raw_text: trimmed,
-            meta: { type: 'pdf_parse_v2', pages: result?.total, quality }
+            meta: withVersion({ type: 'pdf_parse_v2', pages: result?.total, quality })
           };
         }
+        console.warn('[preprocess] pdf-parse v2 text unusable, falling back to OCR');
       }
     } catch (err) {
       console.warn('[preprocess] pdf-parse v2 getText failed, falling back to legacy parser', err);
@@ -145,13 +171,14 @@ async function parsePdf(filePath) {
       const data = await legacyPdfParseFn(buffer);
       if (data?.text) {
         const trimmed = data.text.trim();
-        if (trimmed.length > 10) {
+        if (isUsablePdfText(trimmed)) {
           const quality = assessTextQuality(trimmed);
           return {
             raw_text: trimmed,
-            meta: { type: 'pdf_parse_v1', pages: data?.numpages, quality }
+            meta: withVersion({ type: 'pdf_parse_v1', pages: data?.numpages, quality })
           };
         }
+        console.warn('[preprocess] pdf-parse legacy text unusable, falling back to OCR');
       }
     } catch (err) {
       console.warn('[preprocess] pdf-parse legacy function failed, falling back to OCR', err);
@@ -168,32 +195,40 @@ async function parsePdf(filePath) {
     metas.push(ocr.meta);
   }
   const quality = assessTextQuality(combined.trim());
-  return { raw_text: combined.trim(), meta: { type: 'pdf_ocr', pages: pageBuffers.length, slices: metas, quality } };
+  return { raw_text: combined.trim(), meta: withVersion({ type: 'pdf_ocr', pages: pageBuffers.length, slices: metas, quality }) };
 }
 
 async function ocrImage(filePath) {
   const worker = await getOcrWorker();
-  const { data } = await worker.recognize(filePath);
+  const baseBuffer = await sharp(filePath)
+    .rotate()
+    .resize({
+      width: MAX_OCR_IMAGE_DIM,
+      height: MAX_OCR_IMAGE_DIM,
+      fit: 'inside',
+      withoutEnlargement: true
+    })
+    .grayscale()
+    .normalize()
+    .sharpen()
+    .toBuffer();
+  const { data } = await worker.recognize(baseBuffer);
   let text = (data.text || '').trim();
-  let meta = { type: 'ocr', confidence: data.confidence };
+  let meta = withVersion({ type: 'ocr', confidence: data.confidence });
   const quality = assessTextQuality(text);
   if (quality.score < 0.4) {
     // try enhanced contrast/greyscale pass
-    const improvedPath = `${filePath}.ocr.png`;
     try {
-      await sharp(filePath)
-        .grayscale()
-        .normalize()
-        .sharpen()
-        .toFile(improvedPath);
-      const { data: improved } = await worker.recognize(improvedPath);
+      const improvedBuffer = await sharp(baseBuffer)
+        .threshold(140)
+        .toBuffer();
+      const { data: improved } = await worker.recognize(improvedBuffer);
       const improvedText = (improved.text || '').trim();
       const improvedQuality = assessTextQuality(improvedText);
       if (improvedQuality.score > quality.score) {
         text = improvedText;
-        meta = { type: 'ocr_enhanced', confidence: improved.confidence, quality: improvedQuality };
+        meta = withVersion({ type: 'ocr_threshold', confidence: improved.confidence, quality: improvedQuality });
       }
-      fs.unlink(improvedPath, () => {});
     } catch (_) {
       // ignore enhancement failures
     }

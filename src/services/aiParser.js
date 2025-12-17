@@ -32,89 +32,76 @@ function markCall() {
 /**
  * Parse invoice text using configured provider.
  * Provider via AI_PROVIDER env: 'openai' (default) | 'heuristic'.
- * Returns { success, data?, provider?, error? }
+ * Returns { success, data?, heuristics?, aiSummary?, provider?, error? }
  */
 async function parseInvoiceText(ocrText, opts = {}) {
   const provider = AI_PROVIDER === 'heuristic' ? 'heuristic' : 'openai';
-  const filePath = opts.filePath;
-  const fileType = opts.fileType;
+  const heuristics = opts.heuristics || (ocrText ? extractWithRules(ocrText) : null);
+  const heuristicData = heuristics ? buildHeuristicData(heuristics) : null;
 
-  // Helper to shape response; keep full data, mark provider/fallback
   const wrap = (res, prov, fallback) => {
     if (!res || !res.success) return res;
+    const shapedData = res.data
+      ? { ...res.data, _provider: prov, _fallback: !!fallback }
+      : res.data;
     return {
-      ...res,
+      success: true,
       provider: prov,
       fallback: !!fallback,
-      data: res.data ? { ...res.data, _provider: prov, _fallback: !!fallback } : res.data
+      data: shapedData,
+      heuristics: res.heuristics || null,
+      aiSummary: res.aiSummary || null
     };
   };
 
-  // Heuristic first
-  const heuristic = ocrText ? extractWithRules(ocrText) : null;
-  const heuristicOk = heuristic && heuristic.vendor_name && heuristic.amounts && heuristic.amounts.total;
-
   const skipMeta = shouldSkipAI(ocrText);
-  if (skipMeta.block) {
-    if (heuristicOk) {
-      return {
+  const heuristicUsable = heuristicData && heuristicData.amounts && heuristicData.amounts.total;
+
+  if (skipMeta.block || provider === 'heuristic') {
+    if (heuristicUsable) {
+      return wrap({
         success: true,
-        data: { ...heuristic, _provider: 'rule', _fallback: true, _note: skipMeta.reason },
-        provider: 'rule',
-        fallback: true
-      };
+        data: heuristicData,
+        heuristics
+      }, 'rule', provider !== 'heuristic');
     }
-    return { success: false, error: `AI skipped: ${skipMeta.reason}` };
+    return { success: false, error: skipMeta.block ? `AI skipped: ${skipMeta.reason}` : 'Heuristic parser failed' };
   }
 
-  if (provider === 'heuristic') {
-    if (heuristicOk) {
-      return {
-        success: true,
-        data: { ...heuristic, _provider: 'rule', _fallback: false },
-        provider: 'rule',
-        fallback: false
-      };
-    }
-    return { success: false, error: 'Heuristic parser failed' };
-  }
-
-  const throttled = skipMeta.throttled;
-
-  // Try selected provider, then fallbacks
-  if (throttled && heuristicOk) {
-    return {
+  if (skipMeta.throttled && heuristicUsable) {
+    return wrap({
       success: true,
-      data: { ...heuristic, _provider: 'rule', _fallback: true, _note: 'AI throttled' },
-      provider: 'rule',
-      fallback: true
-    };
+      data: { ...heuristicData, _note: 'AI throttled' },
+      heuristics
+    }, 'rule', true);
   }
 
   if (provider === 'openai') {
-    if (!throttled || !heuristicOk) {
+    if (!skipMeta.throttled || !heuristicUsable) {
       markCall();
       const oai = await extractOpenAI(ocrText || '', {
-        hints: heuristic || undefined
+        hints: heuristics || undefined,
+        filePath: opts.filePath,
+        fileType: opts.fileType
       });
       if (oai && oai.success) {
-        const merged = mergeAiAndHeuristic(oai.data, heuristic);
-        return wrap({ success: true, data: merged }, 'openai', false);
+        const { normalizedData, aiSummary } = normalizeAiResponse(oai.data, heuristicData);
+        return wrap({
+          success: true,
+          data: normalizedData,
+          heuristics,
+          aiSummary
+        }, 'openai', false);
       }
     }
   }
 
-  // Heuristic fallback
-  if (ocrText) {
-    const rule = extractWithRules(ocrText);
-    if (rule) {
-      return {
-        success: true,
-        data: { ...rule, _provider: 'rule', _fallback: true },
-        provider: 'rule',
-        fallback: true
-      };
-    }
+  if (heuristicUsable) {
+    return wrap({
+      success: true,
+      data: heuristicData,
+      heuristics
+    }, 'rule', true);
   }
 
   return { success: false, error: 'No parser succeeded' };
@@ -122,26 +109,122 @@ async function parseInvoiceText(ocrText, opts = {}) {
 
 module.exports = { parseInvoiceText };
 
-function mergeAiAndHeuristic(aiData, heuristic) {
-  if (!aiData && !heuristic) return null;
-  const result = aiData ? { ...aiData } : {};
-  if (heuristic) {
-    result._hints = {
-      vendor_candidates: heuristic.vendor_candidates || [],
-      total_candidates: heuristic.total_candidates || [],
-      date_candidates: heuristic.date_candidates || [],
-      receipt_hint: heuristic.receipt_hint || null
+function buildHeuristicData(heuristic) {
+  if (!heuristic) return null;
+  const amounts = heuristic.amounts || {};
+  return {
+    vendor_name: heuristic.vendor_name || heuristic.vendor_candidates?.[0] || null,
+    bill_date: heuristic.bill_date || heuristic.date_candidates?.[0] || null,
+    amounts: {
+      subtotal: amounts.subtotal != null ? amounts.subtotal : amounts.total || null,
+      tax_amount: amounts.tax_amount != null ? amounts.tax_amount : null,
+      total: amounts.total != null ? amounts.total : 0
+    },
+    bill_number: heuristic.bill_number || null,
+    confidence: null
+  };
+}
+
+function normalizeAiResponse(aiData, heuristicData) {
+  if (!aiData) {
+    return {
+      normalizedData: heuristicData || null,
+      aiSummary: null
     };
-    if ((!result.vendor_name || result.vendor_name === 'null') && heuristic.vendor_name) {
-      result.vendor_name = heuristic.vendor_name;
-    }
-    if ((!result.bill_date || result.bill_date === 'null') && heuristic.bill_date) {
-      result.bill_date = heuristic.bill_date;
-    }
-    const aiTotal = result?.amounts?.total;
-    if ((aiTotal === undefined || aiTotal === null || aiTotal === 0) && heuristic.amounts?.total) {
-      result.amounts = { ...(result.amounts || {}), total: heuristic.amounts.total };
-    }
   }
-  return result;
+
+  const billDateField = normalizeDateField(aiData.bill_date);
+  const totalField = normalizeAmountField(aiData.total_amount);
+  const subtotal = asNumber(aiData.subtotal);
+  const taxAmount = asNumber(aiData.tax_amount);
+
+  const normalized = {
+    vendor_name: aiData.vendor_name || heuristicData?.vendor_name || null,
+    bill_number: aiData.bill_number || heuristicData?.bill_number || null,
+    bill_date: billDateField.value || heuristicData?.bill_date || null,
+    amounts: {
+      subtotal: subtotal != null
+        ? subtotal
+        : (heuristicData?.amounts?.subtotal || totalField.value || 0),
+      tax_amount: taxAmount != null
+        ? taxAmount
+        : (heuristicData?.amounts?.tax_amount || 0),
+      total: totalField.value != null
+        ? totalField.value
+        : (heuristicData?.amounts?.total || 0)
+    },
+    payment_terms: aiData.payment_terms || null,
+    confidence: totalField.confidence != null
+      ? totalField.confidence
+      : (billDateField.confidence != null ? billDateField.confidence : null)
+  };
+
+  const aiSummary = {
+    vendor_name: aiData.vendor_name || null,
+    bill_number: aiData.bill_number || null,
+    bill_date: billDateField,
+    total_amount: totalField,
+    subtotal,
+    tax_amount: taxAmount,
+    quality_score: normalizeQuality(aiData.quality_score),
+    reason: aiData.reason || null
+  };
+
+  return { normalizedData: normalized, aiSummary };
+}
+
+function normalizeDateField(field) {
+  if (!field || typeof field !== 'object') {
+    return {
+      value: typeof field === 'string' ? field : null,
+      confidence: null,
+      evidence: null
+    };
+  }
+  const parsedValue = typeof field.value === 'string' ? field.value : null;
+  return {
+    value: parsedValue,
+    confidence: field.confidence != null ? clampConfidence(field.confidence) : null,
+    evidence: field.evidence || null
+  };
+}
+
+function normalizeAmountField(field) {
+  if (!field || typeof field !== 'object') {
+    return {
+      value: asNumber(field),
+      confidence: null,
+      evidence: null
+    };
+  }
+  return {
+    value: asNumber(field.value),
+    confidence: field.confidence != null ? clampConfidence(field.confidence) : null,
+    evidence: field.evidence || null
+  };
+}
+
+function asNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  if (Number.isNaN(num)) return null;
+  return num;
+}
+
+function clampConfidence(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return null;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  if (num < 0) return 0;
+  if (num > 1) return 1;
+  return Number(num.toFixed(3));
+}
+
+function normalizeQuality(value) {
+  if (value === null || value === undefined) return null;
+  const num = Number(value);
+  if (Number.isNaN(num)) return null;
+  if (num < 0) return 0;
+  if (num > 100) return 100;
+  return Math.round(num);
 }

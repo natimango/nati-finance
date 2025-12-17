@@ -1,6 +1,18 @@
 const API_URL = '/api';
+const VERIFICATION_FILTER_OPTIONS = [
+    { key: 'all', label: 'All', countKey: 'total' },
+    { key: 'needs_review', label: 'Needs review', countKey: 'needs_review' },
+    { key: 'verified', label: 'Verified', countKey: 'verified' },
+    { key: 'missing_date', label: 'Missing date', countKey: 'missing_date' },
+    { key: 'missing_total', label: 'Missing total', countKey: 'missing_total' },
+    { key: 'low_quality', label: 'Low quality', countKey: 'low_quality' },
+    { key: 'processing', label: 'Processing', countKey: 'processing' },
+    { key: 'unverified', label: 'Unverified', countKey: 'unverified' }
+];
 let allDocuments = [];
 let filteredDocuments = [];
+let verificationFilter = 'all';
+let verificationSummary = null;
 let currentProcessingDoc = null;
 let currentManualDoc = null;
 let manualLineItems = [];
@@ -24,6 +36,116 @@ function getCategory(doc) {
 
 function getCategoryGroup(doc) {
     return doc.category_group || doc.gemini_data?.category_group || null;
+}
+
+function getVerificationStatus(doc) {
+    if (doc.verification && doc.verification.status) return doc.verification.status;
+    return doc.status === 'processed' ? 'unverified' : 'processing';
+}
+
+function docHasBillDate(doc) {
+    if (doc.bill_date) return true;
+    return Boolean(doc.gemini_data?.bill_date);
+}
+
+function docHasTotal(doc) {
+    const values = [
+        doc.bill_total_amount,
+        doc.total_amount,
+        doc.gemini_data?.amounts?.total
+    ];
+    return values.some((value) => {
+        if (value === null || value === undefined || value === '') return false;
+        const num = Number(value);
+        return !Number.isNaN(num) && num > 0;
+    });
+}
+
+function docQualityScore(doc) {
+    if (doc.verification && doc.verification.quality_score != null) {
+        return doc.verification.quality_score;
+    }
+    if (doc.quality_score != null) return Number(doc.quality_score);
+    return null;
+}
+
+function docIsLowQuality(doc) {
+    const quality = docQualityScore(doc);
+    return quality != null && quality < 60;
+}
+
+function docIsMissingDate(doc) {
+    return !docHasBillDate(doc);
+}
+
+function docIsMissingTotal(doc) {
+    return !docHasTotal(doc);
+}
+
+function docMatchesVerificationFilter(doc) {
+    const status = getVerificationStatus(doc);
+    if (verificationFilter === 'all') return true;
+    if (verificationFilter === 'needs_review') return status === 'needs_review';
+    if (verificationFilter === 'verified') return status === 'verified';
+    if (verificationFilter === 'processing') return status === 'processing';
+    if (verificationFilter === 'unverified') return status === 'unverified';
+    if (verificationFilter === 'missing_date') return docIsMissingDate(doc);
+    if (verificationFilter === 'missing_total') return docIsMissingTotal(doc);
+    if (verificationFilter === 'low_quality') return docIsLowQuality(doc);
+    return true;
+}
+
+function encodeTooltip(value) {
+    if (!value) return '';
+    return value.replace(/"/g, '&quot;');
+}
+
+function escapeHTML(value) {
+    if (value === null || value === undefined) return '';
+    return value
+        .toString()
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function buildVerificationTooltip(verification) {
+    if (!verification) return 'Verification data unavailable';
+    const lines = [];
+    if (verification.reason) lines.push(`Reason: ${verification.reason}`);
+    lines.push(`Quality: ${verification.quality_score ?? '—'}`);
+    if (verification.bill_date_locked) {
+        lines.push(`Bill date: locked (${verification.bill_date_source || 'manual'})`);
+    } else {
+        lines.push(`Bill date source: ${verification.bill_date_source || '—'}`);
+    }
+    if (verification.bill_date_evidence) {
+        lines.push(`↳ ${verification.bill_date_evidence}`);
+    }
+    if (verification.total_locked) {
+        lines.push(`Total: locked (${verification.total_source || 'manual'})`);
+    } else {
+        lines.push(`Total source: ${verification.total_source || '—'}`);
+    }
+    if (verification.total_evidence) {
+        lines.push(`↳ ${verification.total_evidence}`);
+    }
+    return lines.join('\n');
+}
+
+function verificationBadge(doc) {
+    const verification = doc.verification || null;
+    const tooltip = encodeTooltip(buildVerificationTooltip(verification));
+    const base = 'px-2 py-1 rounded text-xs font-medium whitespace-nowrap';
+    const badgeMap = {
+        verified: { cls: 'bg-green-100 text-green-800', label: 'Verified ✅' },
+        needs_review: { cls: 'bg-amber-100 text-amber-800', label: 'Needs review ⚠️' },
+        processing: { cls: 'bg-slate-100 text-slate-700', label: 'Processing ⏳' },
+        unverified: { cls: 'bg-gray-100 text-gray-700', label: 'Unverified' }
+    };
+    const status = getVerificationStatus(doc);
+    const badge = badgeMap[status] || badgeMap.unverified;
+    return `<span class="${base} ${badge.cls}" title="${tooltip}">${badge.label}</span>`;
 }
 
 function formatLabel(value) {
@@ -69,12 +191,54 @@ async function loadDocuments() {
             allDocuments = data.documents;
             filteredDocuments = allDocuments;
             displayDocuments(filteredDocuments);
+            await loadVerificationSummary();
             updateDocCount();
             renderCalendar();
         }
     } catch (error) {
         console.error('Error loading documents:', error);
     }
+}
+
+async function loadVerificationSummary() {
+    try {
+        const response = await authFetch(`${API_URL}/documents/verification/summary`);
+        const data = await response.json();
+        if (data.success) {
+            verificationSummary = data.summary || null;
+        }
+    } catch (error) {
+        console.error('Error loading verification summary:', error);
+        verificationSummary = null;
+    }
+    renderVerificationFilters();
+}
+
+function renderVerificationFilters() {
+    const container = document.getElementById('verification-filter-chips');
+    if (!container) return;
+    const summary = verificationSummary || {};
+    const buttons = VERIFICATION_FILTER_OPTIONS.map((option) => {
+        const countValue = option.countKey === 'total'
+            ? (summary.total ?? allDocuments.length)
+            : (summary[option.countKey] ?? 0);
+        const isActive = verificationFilter === option.key;
+        const base = 'px-3 py-1 rounded-full text-xs font-medium border transition';
+        const activeCls = isActive ? 'bg-indigo-600 text-white border-indigo-600 shadow' : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-300';
+        return `<button type="button" class="${base} ${activeCls}" data-verification-filter="${option.key}" onclick="setVerificationFilter('${option.key}')">${option.label} <span class="ml-1 font-semibold">${countValue}</span></button>`;
+    }).join('');
+    container.innerHTML = buttons;
+}
+
+function setVerificationFilter(key) {
+    verificationFilter = key;
+    renderVerificationFilters();
+    filterDocuments();
+}
+
+function getVerificationFilterLabel(key) {
+    const option = VERIFICATION_FILTER_OPTIONS.find((opt) => opt.key === key);
+    return option ? option.label : key;
 }
 
 function displayDocuments(documents) {
@@ -146,6 +310,7 @@ function renderTable(documents) {
             ? `#${String(doc.document_id).padStart(4, '0')}`
             : `#${String(idx + 1).padStart(4, '0')}`;
         const dateDisplay = formatDateDisplay(billDate);
+        const verificationCell = verificationBadge(doc);
         return `
             <tr class="hover:bg-gray-50 cursor-pointer" data-id="${doc.document_id}" onclick="openBillModal(${doc.document_id})">
                 <td class="px-3 py-2 text-sm text-gray-700">${fileNumber}</td>
@@ -153,6 +318,7 @@ function renderTable(documents) {
                 <td class="px-3 py-2 text-sm text-gray-700">${categoryDisplay}</td>
                 <td class="px-3 py-2 text-sm text-gray-700">${paymentMethod}</td>
                 <td class="px-3 py-2 text-xs">${status}</td>
+                <td class="px-3 py-2 text-xs">${verificationCell}</td>
                 <td class="px-3 py-2 text-right text-sm font-semibold">₹${Number(total || 0).toLocaleString()}</td>
                 <td class="px-3 py-2 text-xs text-gray-700">${dateDisplay}</td>
             </tr>
@@ -208,6 +374,27 @@ function openBillModal(id) {
     titleEl.textContent = vendor;
     subEl.textContent = `Bill: ${billNo} • ${formatDateDisplay(billDate)}`;
 
+    const verificationInfo = doc.verification || null;
+    const qualityScoreLabel = docQualityScore(doc);
+    const verificationPanel = verificationInfo ? `
+            <div class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm text-slate-700">
+                <div class="flex items-center justify-between gap-2">
+                    ${verificationBadge(doc)}
+                    ${qualityScoreLabel != null ? `<span class="text-xs text-slate-500">Quality ${qualityScoreLabel}/100</span>` : ''}
+                </div>
+                ${verificationInfo.reason ? `<p class="text-xs text-amber-600 mt-2">${escapeHTML(verificationInfo.reason)}</p>` : ''}
+                ${verificationInfo.bill_date_evidence ? `<p class="text-[11px] text-slate-500 mt-2">Date evidence: ${escapeHTML(verificationInfo.bill_date_evidence)}</p>` : ''}
+                ${verificationInfo.total_evidence ? `<p class="text-[11px] text-slate-500">Total evidence: ${escapeHTML(verificationInfo.total_evidence)}</p>` : ''}
+                ${(verificationInfo.bill_date_locked || verificationInfo.total_locked) ? `<p class="text-[11px] text-slate-500 mt-2"><i class="fas fa-lock mr-1"></i>Locked fields won’t be overwritten</p>` : ''}
+                ${verificationInfo.status === 'needs_review' ? `
+                    <div class="flex flex-wrap gap-2 mt-3">
+                        <button onclick="actionRetry(${doc.document_id})" class="px-3 py-2 bg-purple-600 text-white rounded-lg text-xs flex items-center gap-1"><i class="fas fa-robot"></i><span>Re-run AI</span></button>
+                        <button onclick="actionManual(${doc.document_id})" class="px-3 py-2 bg-orange-500 text-white rounded-lg text-xs flex items-center gap-1"><i class="fas fa-pen"></i><span>Fix now</span></button>
+                    </div>
+                ` : ''}
+            </div>
+        ` : '';
+
     body.innerHTML = `
         <div class="space-y-3">
             <div class="flex items-start justify-between gap-3">
@@ -220,6 +407,7 @@ function openBillModal(id) {
                     ${categoryLabel && categoryLabel !== '—' ? `<span class="inline-flex items-center px-2 py-1 bg-indigo-50 text-indigo-700 rounded text-xs"><i class="fas fa-tag mr-1"></i>${categoryLabel}</span>` : ''}
                 </div>
             </div>
+            ${verificationPanel}
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-700">
                 <div><span class="text-gray-500">Bill No:</span> ${billNo}</div>
                 <div><span class="text-gray-500">Date:</span> ${formatDateDisplay(billDate)}</div>
@@ -585,6 +773,8 @@ function filterDocuments() {
             (doc.notes && doc.notes.toLowerCase().includes(searchTerm))
         );
     }
+
+    filtered = filtered.filter(doc => docMatchesVerificationFilter(doc));
     
     filteredDocuments = filtered;
     displayDocuments(filteredDocuments);
@@ -625,6 +815,8 @@ function clearFilters() {
     document.getElementById('filter-category').value = '';
     document.getElementById('filter-payment').value = '';
     document.getElementById('search-box').value = '';
+    verificationFilter = 'all';
+    renderVerificationFilters();
     filterDocuments();
 }
 
@@ -661,10 +853,11 @@ function updateDocCount() {
     if (heroEl) {
         heroEl.textContent = `${showing}/${total || 0}`;
     }
-    const manualCount = allDocuments.filter(doc => doc.status === 'manual_required').length;
+    const needsReviewCount = verificationSummary?.needs_review
+        ?? allDocuments.filter(doc => getVerificationStatus(doc) === 'needs_review').length;
     const processedCount = allDocuments.filter(doc => doc.status === 'processed').length;
-    const manualEl = document.getElementById('manual-required-count');
-    if (manualEl) manualEl.textContent = manualCount;
+    const needsReviewEl = document.getElementById('needs-review-count');
+    if (needsReviewEl) needsReviewEl.textContent = needsReviewCount;
     const processedEl = document.getElementById('processed-count');
     if (processedEl) processedEl.textContent = processedCount;
 }
@@ -683,6 +876,7 @@ function updateFilterSummary() {
     if (category) activeFilters.push(`Category: ${category}`);
     if (paymentFilter) activeFilters.push(`Payment: ${paymentFilter}`);
     if (searchTerm) activeFilters.push(`Search: "${searchTerm}"`);
+    if (verificationFilter !== 'all') activeFilters.push(`Verification: ${getVerificationFilterLabel(verificationFilter)}`);
     
     const filterContainer = document.getElementById('active-filters');
     const filterSummary = document.getElementById('filter-summary');

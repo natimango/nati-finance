@@ -7,6 +7,7 @@ const {
   uploadBill, 
   getDocuments, 
   getDocument,
+  getVerificationSummary,
   deleteDocument,
   rerunAIForDocuments
 } = require('../controllers/uploadController');
@@ -16,6 +17,9 @@ router.use(authorize('uploader', 'manager', 'admin'));
 
 // Upload bill
 router.post('/upload', upload.single('bill'), uploadBill);
+
+// Verification snapshot summary
+router.get('/documents/verification/summary', getVerificationSummary);
 
 // Get all documents
 router.get('/documents', getDocuments);

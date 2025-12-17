@@ -1,10 +1,12 @@
 const pool = require('../config/database');
-const { parseInvoiceText } = require('../services/aiParser');
 const { preprocessFile } = require('../services/preprocessService');
 const fs = require('fs');
 const path = require('path');
 const { normalizeCategory } = require('../utils/categoryMap');
 const { safeParseJSON } = require('../utils/json');
+const { getRawTextFromDoc } = require('../utils/ocrCache');
+const { logDocumentFieldChange } = require('../utils/documentAudit');
+const { processDocumentWithAI } = require('./uploadController');
 
 const DEFAULT_JOURNAL_USER_ID = parseInt(process.env.SYSTEM_USER_ID || '1', 10);
 const resolveJournalUser = (preferred) => preferred || DEFAULT_JOURNAL_USER_ID;
@@ -28,487 +30,62 @@ function hasActionablePaymentTerms(terms) {
   return hasDueDate || hasNet;
 }
 
-// Process bill with AI (OpenAI primary, heuristic fallback)
+function normalizeISODate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toISOString().slice(0, 10);
+}
+
+// Process bill with AI
 async function processBillWithAI(req, res) {
   try {
     const { document_id } = req.params;
-    const { drop_name, trip_name, channel, campaign, department, tags, payment_method } = req.body || {};
-    const paymentMethod = (payment_method || 'UNSPECIFIED').toUpperCase();
-    let rawTextHint = null;
-    let tagsValue = null;
-    if (Array.isArray(tags)) {
-      tagsValue = tags;
-    } else if (typeof tags === 'string') {
-      tagsValue = tags.split(',').map(t => t.trim()).filter(Boolean);
-    }
-    
-    // Get document info
+    const { payment_method, drop_name } = req.body || {};
+
     const docResult = await pool.query(
       'SELECT * FROM documents WHERE document_id = $1',
       [document_id]
     );
-    
     if (docResult.rows.length === 0) {
       return res.status(404).json({ error: 'Document not found' });
     }
-    
+
     const document = docResult.rows[0];
     const parsedGemini = safeParseJSON(document.gemini_data);
-    const existingBill = await pool.query(
-      'SELECT confidence_score FROM bills WHERE document_id = $1',
-      [document_id]
-    );
-    const manualLocked =
-      (parsedGemini && parsedGemini.manual === true) ||
-      existingBill.rows.some(row => parseFloat(row.confidence_score || 0) >= 0.99);
-    if (manualLocked) {
-      return res.status(409).json({ error: 'Bill already finalized manually. Use manual edit to update this record.' });
+    if (parsedGemini) {
+      document.gemini_data = parsedGemini;
     }
 
-    // Try to reuse preprocessed raw text if present
-    if (document.gemini_data && document.gemini_data.raw_text) {
-      rawTextHint = document.gemini_data.raw_text;
-    } else if (typeof document.gemini_data === 'string') {
-      try {
-        const parsed = JSON.parse(document.gemini_data);
-        if (parsed.raw_text) rawTextHint = parsed.raw_text;
-      } catch (_) {}
-    }
-    // If no raw text cached, preprocess now to get text for heuristic fallback
-    if (!rawTextHint) {
-      try {
-        const pre = await preprocessFile(document.file_path, document.file_type);
-        rawTextHint = pre.raw_text || null;
-      } catch (err) {
-        console.error('Preprocess (processBillWithAI) error:', err.message);
-      }
-    }
-    if (!rawTextHint || rawTextHint.length < 10) {
-      await pool.query(
-        'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
-        ['manual_required', 'OCR text missing; manual review needed', document_id]
-      );
-      return res.status(400).json({ error: 'OCR text missing; manual review needed' });
-    }
-    
-    // Extract data using AI
-    console.log('Processing with AI:', document.file_name);
-    let extraction = await parseInvoiceText(rawTextHint, {
-      filePath: document.file_path,
-      fileType: document.file_type
-    });
-
-    if (!extraction || !extraction.success) {
-      // Mark document for manual processing if AI fails
-      await pool.query(
-        'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
-        ['manual_required', 'AI extraction failed, manual processing needed', document_id]
-      );
-      return res.status(500).json({ error: 'AI extraction failed', details: extraction?.error });
-    }
-    
-    const provider = extraction.provider || 'openai';
-    const data = { 
-      ...extraction.data, 
-      _provider: provider, 
-      _fallback: provider !== 'openai' 
+    const effectivePayment = (payment_method || document.payment_method || 'UNSPECIFIED').toUpperCase();
+    const payload = {
+      ...document,
+      drop_name: drop_name || document.drop_name || null,
+      payment_method: effectivePayment
     };
-
-    const dimError = validateDimensions(
-      data.category || document.document_category,
-      drop_name || data.drop_name,
-      channel || data.channel,
-      campaign || data.campaign
-    );
-    if (dimError) {
-      await pool.query(
-        'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
-        ['manual_required', dimError, document_id]
-      );
-      return res.status(400).json({ error: dimError });
-    }
-    
-    // Update document with extracted data
-    await pool.query(
-      'UPDATE documents SET gemini_data = $1, status = $2 WHERE document_id = $3',
-      [JSON.stringify(data), 'processed', document_id]
-    );
-    
-    // Create or update vendor
-    let vendorId = null;
-    if (data.vendor_name) {
-      const vendorResult = await pool.query(
-        `INSERT INTO vendors (vendor_name, gstin, pan, address, contact_person, vendor_type)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (vendor_code) DO UPDATE SET vendor_name = EXCLUDED.vendor_name
-         RETURNING vendor_id`,
-        [
-          data.vendor_name,
-          data.vendor_gstin || null,
-          data.vendor_pan || null,
-          data.vendor_address || null,
-          data.vendor_contact || null,
-          data.category || 'vendor'
-        ]
-      );
-      vendorId = vendorResult.rows[0]?.vendor_id || null;
-    }
-    
-    // Create bill entry
-    const billResult = await pool.query(
-      `INSERT INTO bills 
-       (document_id, vendor_id, bill_number, bill_date, subtotal, tax_amount, total_amount, 
-        category, confidence_score, status, drop_name, trip_name, channel, campaign, department, tags, payment_method, payment_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18)
-       RETURNING bill_id`,
-      [
-        document_id,
-        vendorId,
-        data.bill_number || null,
-        data.bill_date || null,
-        data.amounts?.subtotal || 0,
-        data.amounts?.tax_amount || 0,
-        data.amounts?.total || 0,
-        data.category || 'misc',
-        data.confidence || 0.8,
-        'pending',
-        drop_name || data.drop_name || null,
-        trip_name || data.trip_name || null,
-        channel || data.channel || null,
-        campaign || data.campaign || null,
-        department || data.department || null,
-        tagsValue ? JSON.stringify(tagsValue) : (data.tags ? JSON.stringify(data.tags) : null),
-        paymentMethod,
-        'pending'
-      ]
-    );
-    
-    const billId = billResult.rows[0].bill_id;
-    
-    const aiScheduleCreated = await createPaymentSchedule(billId, {
-      bill_date: data.bill_date,
-      amounts: data.amounts || { total: data.total_amount || 0 },
-      payment_terms: data.payment_terms
-    });
-    const aiPaymentStatus = aiScheduleCreated ? 'pending' : 'paid';
-    await pool.query('UPDATE bills SET payment_status = $1 WHERE bill_id = $2', [aiPaymentStatus, billId]);
-    
-    // Save line items
-    if (data.line_items && data.line_items.length > 0) {
-      for (let i = 0; i < data.line_items.length; i++) {
-        const item = data.line_items[i];
-        await pool.query(
-          `INSERT INTO bill_items (bill_id, description, quantity, unit_price, amount, line_number)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [billId, item.description, item.quantity, item.rate, item.amount, i + 1]
-        );
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: 'Bill processed successfully',
-      bill_id: billId,
-      extracted_data: data
-    });
-    
-  } catch (error) {
-    console.error('Bill processing error:', error);
-    res.status(500).json({ error: error.message });
-  }
-}
-
-// Import bank PDF with password and auto-match (non-cash)
-async function importBankPDF(req, res) {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'PDF file is required (field name: file)' });
-    }
-    const password = req.body?.password || '';
-    const text = await parsePdfBuffer(req.file.buffer, password);
-    if (!text || text.length < 10) {
-      return res.status(400).json({ error: 'Could not extract text from PDF (check password)' });
-    }
-    const rows = parseBankTextStrict(text);
-    const matches = [];
-    const unmatched = [];
-
-    for (const row of rows) {
-      const amount = Math.abs(row.amount || 0);
-      if (!amount) {
-        unmatched.push({ ...row, reason: 'Amount missing/zero' });
-        continue;
-      }
-      const match = await findScheduleMatch(amount);
-      if (!match) {
-        unmatched.push({ ...row, reason: 'No schedule match' });
-        continue;
-      }
-      // Record payment
-      const paymentResult = await pool.query(
-        `INSERT INTO payments (bill_id, schedule_id, payment_date, amount_paid, payment_method, notes, reference_number, recorded_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING payment_id`,
-        [
-          match.bill_id,
-          match.schedule_id,
-          row.date || new Date(),
-          amount,
-          'BANK_IMPORT',
-          row.description || row.reference || null,
-          row.reference || null,
-          1
-        ]
-      );
-      await pool.query(
-        `UPDATE payment_schedule 
-         SET amount_paid = amount_paid + $1,
-             payment_status = CASE 
-               WHEN amount_paid + $1 >= amount_due THEN 'PAID'
-               ELSE 'PARTIAL'
-             END
-         WHERE schedule_id = $2`,
-        [amount, match.schedule_id]
-      );
-      matches.push({
-        payment_id: paymentResult.rows[0].payment_id,
-        schedule_id: match.schedule_id,
-        bill_id: match.bill_id,
-        amount,
-        withdrawal: row.withdrawal,
-        deposit: row.deposit,
-        balance: row.balance,
-        reference: row.reference,
-        description: row.description
+    const rawTextHint = getRawTextFromDoc(document);
+    const actorMeta = { actorType: req.user?.role || 'user', actorId: req.user?.userId || null };
+    const result = await processDocumentWithAI(payload, rawTextHint, effectivePayment, actorMeta);
+    if (!result || !result.success) {
+      return res.status(400).json({
+        error: result?.reason || 'AI extraction failed',
+        details: result?.error || null
       });
     }
 
     res.json({
       success: true,
-      matched: matches.length,
-      unmatched: unmatched.length,
-      matches,
-      unmatched
+      message: 'Bill processed by AI',
+      bill_id: result.bill_id,
+      document_id
     });
   } catch (error) {
-    console.error('Bank PDF import error:', error);
+    console.error('AI bill processing error:', error);
     res.status(500).json({ error: error.message });
   }
 }
 
-async function parsePdfBuffer(buffer, password) {
-  // Try pdfjs-dist first (position-aware), then pdf-parse, then OCR fallback.
-  let text = '';
-  try {
-    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    const uint8Data = Buffer.isBuffer(buffer)
-      ? new Uint8Array(buffer)
-      : buffer instanceof Uint8Array
-        ? buffer
-        : new Uint8Array(buffer.buffer || buffer, buffer.byteOffset || 0, buffer.byteLength || buffer.length);
-    const loadingTask = pdfjsLib.getDocument({
-      data: uint8Data,
-      password: password || undefined,
-      useSystemFonts: true
-    });
-    const pdfDoc = await loadingTask.promise;
-    for (let i = 1; i <= pdfDoc.numPages; i++) {
-      const page = await pdfDoc.getPage(i);
-      const content = await page.getTextContent({ normalizeWhitespace: true, disableCombineTextItems: false });
-      const lines = [];
-      for (const item of content.items) {
-        const y = Math.round(item.transform[5]);
-        const x = Math.round(item.transform[4]);
-        lines.push({ y, x, str: (item.str || '').trim() });
-      }
-      const grouped = lines.reduce((acc, item) => {
-        if (!item.str) return acc;
-        const key = item.y;
-        if (!acc[key]) acc[key] = [];
-        acc[key].push(item);
-        return acc;
-      }, {});
-      const sortedLines = Object.keys(grouped)
-        .map(y => ({ y: Number(y), parts: grouped[y].sort((a, b) => a.x - b.x) }))
-        .sort((a, b) => b.y - a.y);
-      const pageText = sortedLines.map(line => line.parts.map(p => p.str).join(' ')).join('\n');
-      text += pageText + '\n';
-    }
-  } catch (err) {
-    console.error('pdfjs parse error:', err.message);
-  }
-
-  if (!text || text.trim().length < 20) {
-    try {
-      const pdfParse = require('pdf-parse');
-      const parsed = await pdfParse(buffer, { password: password || undefined });
-      if (parsed && parsed.text && parsed.text.trim().length > 10) {
-        text = parsed.text;
-      }
-    } catch (err) {
-      console.error('pdf-parse fallback error:', err.message);
-    }
-  }
-
-  if (!text || text.trim().length < 20) {
-    const tmpPath = path.join(__dirname, `../../uploads/tmp-bank-${Date.now()}.pdf`);
-    fs.writeFileSync(tmpPath, Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer));
-    try {
-      const pre = await preprocessFile(tmpPath, 'application/pdf');
-      if (pre && pre.raw_text) return pre.raw_text;
-    } finally {
-      fs.unlink(tmpPath, () => {});
-    }
-  }
-  return text;
-}
-
-function parseBankText(text) {
-  const lines = text.split('\n')
-    .map(l => l.trim().replace(/\s+/g, ' '))
-    .filter(Boolean);
-  const rows = [];
-  const seen = new Set();
-  for (const line of lines) {
-    // Skip obvious headers/summaries to avoid hallucinated rows.
-    if (/(date\s*amount\s*ref|statement of account|opening balance|closing balance|available balance|summary|page \d+)/i.test(line)) continue;
-    // Require a date near the start of the line.
-    const dateMatch = line.match(/^(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})\b/);
-    if (!dateMatch) continue;
-    const cleaned = line.replace(/,/g, '');
-    const numberMatches = [...cleaned.matchAll(/-?\d+(?:\.\d+)?/g)];
-    if (!numberMatches.length) continue;
-
-    // Try to pick the transaction amount (not balance).
-    let amount = null;
-    // Look for explicit DR/CR markers near numbers.
-    const drcrMatch = cleaned.match(/(-?\d+(?:\.\d+)?)[ ]*(DR|CR|Cr|Dr|D|C)\b/);
-    if (drcrMatch) {
-      amount = parseFloat(drcrMatch[1]);
-      if (drcrMatch[2].toUpperCase().startsWith('D')) amount = -Math.abs(amount);
-    }
-    // If two or more numbers and no DR/CR, prefer the first non-date number as txn and assume the last is balance.
-    if (amount === null && numberMatches.length >= 2) {
-      const nums = numberMatches.map(m => parseFloat(m[0])).filter(n => !Number.isNaN(n));
-      if (nums.length >= 2) {
-        amount = nums[0];
-      }
-    }
-    // Fallback: use the last number.
-    if (amount === null) {
-      amount = parseFloat(numberMatches[numberMatches.length - 1][0]);
-    }
-    if (Number.isNaN(amount)) continue;
-
-    // Capture a short reference without the chosen amount token.
-    let amountToken = numberMatches[numberMatches.length - 1][0];
-    if (drcrMatch) {
-      amountToken = drcrMatch[1];
-    } else if (numberMatches.length >= 2) {
-      amountToken = numberMatches[0][0];
-    }
-    const ref = line.includes(amountToken)
-      ? line.slice(line.indexOf(dateMatch[1]) + dateMatch[1].length).replace(amountToken, '').trim()
-      : line.substring(0, 80);
-    const key = `${dateMatch[1]}_${amount}_${ref}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    rows.push({
-      date: dateMatch[1],
-      amount,
-      reference: ref || line.substring(0, 80),
-      description: line.substring(0, 160)
-    });
-  }
-  return rows;
-}
-
-// Deterministic parser: date at start + first number as txn amount.
-function parseBankTextStrict(text) {
-  const lines = text.split('\n')
-    .map(l => l.trim().replace(/\s+/g, ' '))
-    .filter(Boolean);
-  const rows = [];
-  const seen = new Set();
-  for (const line of lines) {
-    if (!line) continue;
-    if (/(opening balance|closing balance|available balance|page \d+)/i.test(line)) continue;
-    const dateMatch = line.match(/^(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})\b/);
-    if (!dateMatch) continue;
-    const cleaned = line.replace(/,/g, '').replace(/₹/gi, '').replace(/\b(rs|inr)\b/gi, '');
-    const rest = cleaned.slice(dateMatch[0].length).trim();
-
-    // Capture numeric tokens (with commas) and pick the last three as balance/deposit/withdrawal.
-    const numberMatches = [...rest.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
-    if (!numberMatches.length) continue;
-    let balanceTok = null;
-    let depositTok = null;
-    let withdrawalTok = null;
-
-    if (numberMatches.length >= 3) {
-      balanceTok = numberMatches[numberMatches.length - 1][0];
-      depositTok = numberMatches[numberMatches.length - 2][0];
-      withdrawalTok = numberMatches[numberMatches.length - 3][0];
-    } else if (numberMatches.length === 2) {
-      // Assume: [amount] [balance]
-      withdrawalTok = numberMatches[0][0];
-      balanceTok = numberMatches[1][0];
-    } else {
-      // Single number -> treat as amount/withdrawal
-      withdrawalTok = numberMatches[0][0];
-    }
-
-    const balance = balanceTok ? parseFloat(balanceTok.replace(/,/g, '')) : null;
-    const deposit = depositTok ? parseFloat(depositTok.replace(/,/g, '')) : null;
-    const withdrawal = withdrawalTok ? parseFloat(withdrawalTok.replace(/,/g, '')) : null;
-
-    // Decide amount: prefer withdrawal when present/non-zero, else deposit.
-    let amount = null;
-    const hasWithdrawal = withdrawal !== null && !Number.isNaN(withdrawal) && withdrawal !== 0;
-    const hasDeposit = deposit !== null && !Number.isNaN(deposit) && deposit !== 0;
-
-    if (hasWithdrawal) {
-      amount = -Math.abs(withdrawal);
-    } else if (hasDeposit) {
-      amount = Math.abs(deposit);
-    } else if (withdrawal !== null && !Number.isNaN(withdrawal)) {
-      // Two-number rows with a single amount: default to withdrawal to avoid missing debits.
-      amount = -Math.abs(withdrawal);
-    } else {
-      continue; // nothing usable
-    }
-
-    // Reference: remove the numeric tokens (withdrawal/deposit/balance) from the tail, keep particulars.
-    let refText = rest;
-    if (withdrawalTok) refText = refText.replace(withdrawalTok, '');
-    if (depositTok) refText = refText.replace(depositTok, '');
-    refText = refText.replace(balanceTok, '');
-    const referenceText = refText
-      .replace(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g, '') // dates
-      .replace(/-?\d[\d,]*(?:\.\d+)?/g, '') // numbers
-      .replace(/₹/gi, '')
-      .replace(/\b(rs|inr)\b/gi, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (Number.isNaN(amount)) continue;
-
-    const key = `${dateMatch[1]}_${amount}_${referenceText}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    rows.push({
-      date: dateMatch[1],
-      amount,
-      withdrawal: !Number.isNaN(withdrawal) ? withdrawal : null,
-      deposit: !Number.isNaN(deposit) ? deposit : null,
-      balance: !Number.isNaN(balance) ? balance : null,
-      reference: referenceText || '',
-      description: referenceText || ''
-    });
-  }
-  return rows;
-}
 // Manual processing when AI is unavailable or needs override
 async function processBillManual(req, res) {
   const { document_id } = req.params;
@@ -612,8 +189,16 @@ async function processBillManual(req, res) {
     }
 
     // Upsert bill (if a bill already exists for this document_id, update it instead of creating a duplicate)
-    const existingBill = await pool.query('SELECT bill_id FROM bills WHERE document_id = $1', [document_id]);
+    const existingBill = await pool.query(
+      'SELECT bill_id, bill_date, total_amount, bill_date_locked, total_locked FROM bills WHERE document_id = $1',
+      [document_id]
+    );
     let billId = null;
+    const previousBill = existingBill.rows[0] || null;
+    const previousBillDate = normalizeISODate(previousBill?.bill_date);
+    const previousTotalAmount = previousBill && previousBill.total_amount != null
+      ? Number(previousBill.total_amount)
+      : null;
     if (existingBill.rows.length > 0) {
       billId = existingBill.rows[0].bill_id;
       await pool.query(
@@ -693,6 +278,39 @@ async function processBillManual(req, res) {
       billId = billResult.rows[0].bill_id;
     }
 
+    const actorType = (req.user?.role || 'user').toLowerCase();
+    const actorId = req.user?.userId || null;
+    const lockActor = actorId || DEFAULT_JOURNAL_USER_ID;
+    const lockBillDate = Boolean(bill_date);
+    if (bill_date) {
+      await pool.query('UPDATE bills SET bill_date_locked = TRUE WHERE bill_id = $1', [billId]);
+      await logDocumentFieldChange({
+        documentId: document_id,
+        fieldName: 'bill_date',
+        oldValue: previousBillDate,
+        newValue: bill_date,
+        actorType: actorType === 'admin' ? 'admin' : 'user',
+        actorId,
+        reason: 'manual_update',
+        confidence: 1,
+        evidence: 'manual entry'
+      });
+    }
+    if (total_amount) {
+      await pool.query('UPDATE bills SET total_locked = TRUE WHERE bill_id = $1', [billId]);
+      await logDocumentFieldChange({
+        documentId: document_id,
+        fieldName: 'total_amount',
+        oldValue: previousTotalAmount,
+        newValue: total_amount,
+        actorType: actorType === 'admin' ? 'admin' : 'user',
+        actorId,
+        reason: 'manual_update',
+        confidence: 1,
+        evidence: 'manual entry'
+      });
+    }
+
     const manualScheduleCreated = await createPaymentSchedule(billId, {
       bill_date,
       amounts: { total: total_amount },
@@ -735,6 +353,21 @@ async function processBillManual(req, res) {
       }
     }, vendorId, { createdBy: resolveJournalUser(req.user?.userId || null) });
 
+    const manualExtractionState = {
+      run_at: new Date().toISOString(),
+      provider: 'manual',
+      manual: true,
+      ai: {
+        vendor_name,
+        bill_date: bill_date || null,
+        total_amount: total_amount || null,
+        confidence: 1
+      }
+    };
+    const verificationStatus = bill_date ? 'verified' : 'needs_review';
+    const qualityScore = bill_date ? 100 : 90;
+    const verificationReason = bill_date ? null : 'Manual: missing bill date';
+
     // Update document status and stash manual data
     await pool.query(
       `UPDATE documents 
@@ -742,8 +375,16 @@ async function processBillManual(req, res) {
            gemini_data = $2,
            notes = COALESCE($3, notes),
            document_category = $4,
-           payment_method = COALESCE($5, payment_method)
-       WHERE document_id = $6`,
+           payment_method = COALESCE($5, payment_method),
+           verification_status = $6,
+           quality_score = $7,
+           extraction_state = $8,
+           verification_reason = $9,
+           bill_date_locked = CASE WHEN $10 THEN TRUE ELSE bill_date_locked END,
+           total_locked = CASE WHEN $11 THEN TRUE ELSE total_locked END,
+           locked_by_user_id = $12,
+           locked_at = NOW()
+       WHERE document_id = $13`,
       [
         'processed',
         JSON.stringify({
@@ -765,6 +406,13 @@ async function processBillManual(req, res) {
         notes || null,
         normalizedCategory || document.document_category || 'misc',
         normalizedPayment,
+        verificationStatus,
+        qualityScore,
+        JSON.stringify(manualExtractionState),
+        verificationReason,
+        lockBillDate,
+        true,
+        lockActor,
         document_id
       ]
     );

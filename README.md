@@ -42,6 +42,7 @@ JWT_SECRET=super-long-random-string
 UPLOAD_IMAGE_MAX_DIM=2000   # optional resize limit in pixels
 UPLOAD_IMAGE_JPEG_QUALITY=80
 SYSTEM_USER_ID=1            # fallback user id for system journal entries
+VERIFY_CONF_THRESHOLD=0.85  # min AI confidence (0-1) when auto-applying date/total
 ```
 Adjust keys based on the provider you actually enable.
 

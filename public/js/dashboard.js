@@ -1,5 +1,11 @@
 const API_URL = '/api';
 const BRAIN_API = '/api/brain';
+const ALERT_LABELS = {
+    BUDGET_VARIANCE: 'Budget variance',
+    DOC_NEEDS_REVIEW_AGED: 'Needs review 24h+',
+    DOC_LOW_QUALITY: 'Low-quality OCR',
+    DOC_HIGH_VALUE_NEEDS_REVIEW: 'High-value needs review'
+};
 
 function authFetch(url, options = {}) {
     const opts = Object.assign({ credentials: 'include' }, options);
@@ -236,17 +242,9 @@ function renderWatchdog(data, alerts) {
         `;
     }).join('');
 
-    const budgetHtml = (alerts || []).length
-        ? alerts.map(alert => `
-            <div class="rounded-xl border border-amber-100 bg-amber-50 p-3">
-                <div class="flex items-center justify-between text-sm font-semibold text-amber-700">
-                    <span><i class="fas fa-coins mr-2"></i>${alert.drop_name || 'Drop'} • ${alert.category_group || 'Group'}</span>
-                    <span>${alert.severity === 'critical' ? 'Over budget' : '80%+'}</span>
-                </div>
-                <div class="mt-1 text-xs text-slate-600">${alert.message}</div>
-            </div>
-          `).join('')
-        : `<div class="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-600">All budgets within range</div>`;
+    const alertHtml = (alerts || []).length
+        ? alerts.map(renderAlertCard).join('')
+        : `<div class="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-600">All alerts cleared</div>`;
 
     container.innerHTML = `
         <div class="space-y-2">
@@ -254,8 +252,28 @@ function renderWatchdog(data, alerts) {
             ${anomalyHtml}
         </div>
         <div class="space-y-2">
-            <p class="text-xs uppercase tracking-[0.3em] text-slate-500 mt-3">Budget alerts</p>
-            ${budgetHtml}
+            <p class="text-xs uppercase tracking-[0.3em] text-slate-500 mt-3">Alerts</p>
+            ${alertHtml}
+        </div>
+    `;
+}
+
+function renderAlertCard(alert) {
+    const severityClass = alert.severity === 'critical'
+        ? 'border-rose-100 bg-rose-50 text-rose-700'
+        : 'border-amber-100 bg-amber-50 text-amber-700';
+    const label = ALERT_LABELS[alert.alert_type] || alert.alert_type.replace(/_/g, ' ');
+    const subtitle = alert.alert_type === 'BUDGET_VARIANCE'
+        ? `${alert.drop_name || 'Drop'} • ${alert.category_group || 'Group'}`
+        : (alert.document_id ? `Document #${String(alert.document_id).padStart(4, '0')}` : '');
+    return `
+        <div class="rounded-xl border ${severityClass} p-3">
+            <div class="flex items-center justify-between text-sm font-semibold">
+                <span><i class="fas fa-circle-info mr-2"></i>${label}</span>
+                <span>${alert.severity === 'critical' ? 'Critical' : 'Review'}</span>
+            </div>
+            ${subtitle ? `<div class="text-xs text-slate-500 mt-1">${subtitle}</div>` : ''}
+            <div class="mt-1 text-xs text-slate-600">${alert.message}</div>
         </div>
     `;
 }
