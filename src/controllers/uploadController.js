@@ -288,15 +288,21 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
     
     let provider = extraction.provider || 'openai';
     const rawData = extraction.data || {};
-    if ((!rawData.vendor_name || !rawData.amounts?.total) && rawText) {
+    if (rawText) {
       const heuristics = extractWithRules(rawText);
-      if (heuristics && heuristics.vendor_name && heuristics.amounts?.total) {
-        rawData.vendor_name = rawData.vendor_name || heuristics.vendor_name;
-        rawData.bill_date = rawData.bill_date || heuristics.bill_date;
-        rawData.amounts = rawData.amounts || {};
-        rawData.amounts.total = rawData.amounts.total || heuristics.amounts.total;
-        rawData.amounts.subtotal = rawData.amounts.subtotal || heuristics.amounts.subtotal;
-        provider = provider === 'openai' ? 'hybrid' : 'rule';
+      if (heuristics) {
+        if (!rawData.vendor_name && heuristics.vendor_name) {
+          rawData.vendor_name = heuristics.vendor_name;
+        }
+        if (!rawData.bill_date && heuristics.bill_date) {
+          rawData.bill_date = heuristics.bill_date;
+        }
+        if (!rawData.amounts?.total && heuristics.amounts?.total) {
+          rawData.amounts = rawData.amounts || {};
+          rawData.amounts.total = heuristics.amounts.total;
+          rawData.amounts.subtotal = rawData.amounts.subtotal || heuristics.amounts.subtotal;
+          provider = provider === 'openai' ? 'hybrid' : 'rule';
+        }
       }
     }
     const vendorName =

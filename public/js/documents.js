@@ -106,6 +106,7 @@ function renderTable(documents) {
         const fileNumber = doc.document_id
             ? `#${String(doc.document_id).padStart(4, '0')}`
             : `#${String(idx + 1).padStart(4, '0')}`;
+        const dateDisplay = formatDateDisplay(billDate);
         return `
             <tr class="hover:bg-gray-50 cursor-pointer" data-id="${doc.document_id}" onclick="openBillModal(${doc.document_id})">
                 <td class="px-3 py-2 text-sm text-gray-700">${fileNumber}</td>
@@ -114,7 +115,7 @@ function renderTable(documents) {
                 <td class="px-3 py-2 text-sm text-gray-700">${paymentMethod}</td>
                 <td class="px-3 py-2 text-xs">${status}</td>
                 <td class="px-3 py-2 text-right text-sm font-semibold">₹${Number(total || 0).toLocaleString()}</td>
-                <td class="px-3 py-2 text-xs text-gray-500">${formatDate(billDate)}${providerInfo ? `<br><span class="text-[11px] text-gray-500">${providerInfo}</span>` : ''}</td>
+                <td class="px-3 py-2 text-xs text-gray-700">${dateDisplay}</td>
             </tr>
         `;
     }).join('');
@@ -166,7 +167,7 @@ function openBillModal(id) {
         : '';
 
     titleEl.textContent = vendor;
-    subEl.textContent = `Bill: ${billNo} • ${formatDate(billDate)}`;
+    subEl.textContent = `Bill: ${billNo} • ${formatDateDisplay(billDate)}`;
 
     body.innerHTML = `
         <div class="space-y-3">
@@ -735,18 +736,15 @@ function getFileIconInfo(mimeType, fileName) {
     return { icon: 'fa-file-alt', color: 'text-gray-500', label: 'Document' };
 }
 
-function formatDate(dateString) {
-    return new Date(dateString).toLocaleDateString('en-US', {
-        year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-    });
-}
-
 function formatDateInput(date) {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 function formatDateDisplay(dateString) {
-    return new Date(dateString).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    if (!dateString) return '—';
+    const dt = new Date(dateString);
+    if (Number.isNaN(dt.getTime())) return '—';
+    return dt.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 function formatBytes(bytes) {
