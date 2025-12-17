@@ -865,20 +865,24 @@ async function rerunAIForDocuments(req, res) {
     if (role === 'uploader') {
       return res.status(403).json({ error: 'Only managers/admins can re-run AI processing' });
     }
-    const { limit = 50, scope = 'all' } = req.body || {};
+    const { limit = 50, scope = 'missing_dates' } = req.body || {};
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
-    let where = `WHERE COALESCE(d.status, 'uploaded') <> 'deleted'`;
+    const conditions = [`COALESCE(d.status, 'uploaded') <> 'deleted'`];
     if (scope === 'pending') {
-      where += ` AND COALESCE(d.status, 'uploaded') IN ('uploaded','processing','manual_required')`;
+      conditions.push(`COALESCE(d.status, 'uploaded') IN ('uploaded','processing','manual_required')`);
+    } else if (scope === 'missing_dates') {
+      conditions.push(`info.bill_date IS NULL`);
     }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const docsResult = await pool.query(
       `SELECT d.*, 
               info.payment_method AS effective_payment_method,
               info.drop_name AS effective_drop_name,
-              info.confidence_score AS bill_confidence
+              info.confidence_score AS bill_confidence,
+              info.bill_date AS existing_bill_date
        FROM documents d
        LEFT JOIN LATERAL (
-         SELECT payment_method, drop_name, confidence_score
+         SELECT payment_method, drop_name, confidence_score, bill_date
          FROM bills
          WHERE document_id = d.document_id
          ORDER BY bill_id DESC
@@ -891,6 +895,8 @@ async function rerunAIForDocuments(req, res) {
     );
     let processed = 0;
     let skipped = 0;
+    let datesUpdated = 0;
+    let datesStillMissing = 0;
     for (const row of docsResult.rows) {
       const gemData = safeParseJSON(row.gemini_data);
       const manualLocked =
@@ -909,12 +915,23 @@ async function rerunAIForDocuments(req, res) {
       };
       await processDocumentWithAI(docPayload, rawText, effectivePayment);
       processed += 1;
+      const billCheck = await pool.query(
+        'SELECT bill_date FROM bills WHERE document_id = $1',
+        [row.document_id]
+      );
+      if (billCheck.rows.length && billCheck.rows[0].bill_date) {
+        datesUpdated += 1;
+      } else {
+        datesStillMissing += 1;
+      }
     }
     res.json({
       success: true,
       scanned: docsResult.rowCount,
       processed,
-      skipped_manual: skipped
+      skipped_manual: skipped,
+      dates_updated: datesUpdated,
+      dates_still_missing: datesStillMissing
     });
   } catch (error) {
     console.error('Rerun AI error:', error);

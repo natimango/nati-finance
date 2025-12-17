@@ -97,7 +97,7 @@ async function triggerRerunAI() {
         const resp = await authFetch(`${API_URL}/documents/reprocess`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ limit, scope: 'all' })
+            body: JSON.stringify({ limit, scope: 'missing_dates' })
         });
         const data = await resp.json();
         if (!resp.ok || data.error) throw new Error(data.error || 'Failed to re-run AI');
