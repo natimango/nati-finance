@@ -1,6 +1,7 @@
 // Very lightweight heuristic extractor as fallback when AI is unavailable
-const KEYWORDS_TOTAL = /(grand\s+total|total\b|amount\s+due|amount\s+payable|net\s+amount|bill\s+amount)/i;
+const KEYWORDS_TOTAL = /(grand\s+total|total\b|amount\s+due|amount\s+payable|net\s+amount|bill\s+amount|amount\s+paid|paid\s+amount|payment\s+amount|txn\s+amount|debit\s+amount)/i;
 const KEYWORDS_VENDOR_HINT = /(gstin|bill\s+to|invoice\s+to|vendor|supplier|merchant|shop|petrol pump)/i;
+const KEYWORDS_REFERENCE = /(txn|transaction|reference|ref\.?|utr|rrn|qr\s*code|qr\s*id|upi\s*(?:id|ref)|payment\s*id|order\s*id)/i;
 const MONTHS = {
   january: 1, jan: 1,
   february: 2, feb: 2,
@@ -56,6 +57,12 @@ function extractDateCandidates(text) {
   const textRegex2 = /(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*)?(\d{2,4})/gi;
   while ((m = textRegex2.exec(text)) !== null) {
     const normalized = normalizeTextualDate(m[2], m[1], m[3]);
+    if (normalized) matches.push(normalized);
+  }
+
+  const hyphenRegex = /(\d{1,2})[-](Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[-]'?(\d{2,4})/gi;
+  while ((m = hyphenRegex.exec(text)) !== null) {
+    const normalized = normalizeTextualDate(m[1], m[2], m[3]);
     if (normalized) matches.push(normalized);
   }
 
@@ -155,12 +162,16 @@ function extractCurrencyCandidates(lines) {
     const hasCurrency = /₹|rs\.?|inr/i.test(cleanedLine);
     const hasKeyword = KEYWORDS_TOTAL.test(cleanedLine);
     if (!hasCurrency && !hasKeyword) return;
+    const isReferenceLine = KEYWORDS_REFERENCE.test(cleanedLine);
+    if (isReferenceLine && !hasKeyword) return;
 
     const matches = cleanedLine.replace(/[,]/g, '').match(/(\d+(?:\.\d+)?)/g);
     if (!matches) return;
     matches.forEach(numStr => {
       const value = parseFloat(numStr);
       if (Number.isNaN(value) || value <= 0) return;
+       const digits = numStr.replace(/\D/g, '').length;
+       if (digits >= 9 && !hasKeyword && !hasCurrency) return;
       candidates.push({
         value,
         line: cleanedLine,
@@ -176,6 +187,25 @@ function extractCurrencyCandidates(lines) {
     if (a.value !== b.value) return b.value - a.value;
     return a.index - b.index;
   });
+}
+
+function extractContextualAmountCandidates(text) {
+  if (!text) return [];
+  const candidates = [];
+  const ctxRegex = /(amount\s+(?:paid|debited|credited|received|totalled)|payment\s+amount|bill\s+amount|total\s+bill|fare\s+amount|fuel\s+amount)\s*(?:[:\-]|\s|is)?\s*(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)/gi;
+  let m;
+  while ((m = ctxRegex.exec(text)) !== null) {
+    const value = parseFloat(m[2].replace(/,/g, ''));
+    if (Number.isNaN(value) || value <= 0) continue;
+    candidates.push({
+      value,
+      line: m[0],
+      index: -1,
+      hasCurrency: true,
+      hasKeyword: true
+    });
+  }
+  return candidates;
 }
 
 function pickBestTotal(candidates, text) {
@@ -221,7 +251,8 @@ function detectSimpleReceipt(rawText, totals) {
   const patterns = [
     { type: 'fuel', keywords: ['petrol', 'diesel', 'bharat petroleum', 'indian oil', 'hpcl'] },
     { type: 'cab', keywords: ['uber', 'ola', 'rapido', 'meru'] },
-    { type: 'flight', keywords: ['air india', 'indigo', 'vistara', 'pnr'] }
+    { type: 'flight', keywords: ['air india', 'indigo', 'vistara', 'pnr'] },
+    { type: 'upi', keywords: ['upi', 'gpay', 'google pay', 'phonepe', 'paytm', 'amazon pay'] }
   ];
   return patterns.find(pattern =>
     pattern.keywords.some(keyword => lower.includes(keyword))
@@ -233,7 +264,9 @@ function extractWithRules(rawText) {
   const lines = tokenize(rawText);
   const vendorCandidates = extractVendorCandidates(lines);
   const dateCandidates = extractDateCandidates(rawText);
-  const currencyCandidates = extractCurrencyCandidates(lines);
+  const lineCurrencyCandidates = extractCurrencyCandidates(lines);
+  const contextualCandidates = extractContextualAmountCandidates(rawText);
+  const currencyCandidates = [...contextualCandidates, ...lineCurrencyCandidates];
   const bestTotal = pickBestTotal(currencyCandidates, rawText);
   const simplePattern = detectSimpleReceipt(rawText, { total: bestTotal?.value || 0 });
   const totalValue = bestTotal?.value || 0;
