@@ -1,5 +1,12 @@
 const pool = require('../config/database');
 
+const BILL_DATE_SQL = `COALESCE(b.bill_date, b.created_at::date, d.uploaded_at::date)`;
+const ACTIVE_BILL_FILTER = `
+  COALESCE(b.total_amount, 0) > 0
+  AND COALESCE(b.status, 'pending') NOT IN ('deleted', 'void')
+  AND COALESCE(d.status, 'uploaded') <> 'deleted'
+`;
+
 // Get Profit & Loss Statement
 async function getProfitLoss(req, res) {
   try {
@@ -10,12 +17,14 @@ async function getProfitLoss(req, res) {
     
     const billAgg = await pool.query(
       `SELECT 
-         COALESCE(category_group, 'OPERATING') AS category_group,
-         COALESCE(category, 'misc') AS category,
-         SUM(total_amount) AS total
-       FROM bills
-       WHERE bill_date BETWEEN $1 AND $2
-       GROUP BY category_group, category`,
+         COALESCE(b.category_group, 'OPERATING') AS category_group,
+         COALESCE(b.category, 'misc') AS category,
+         SUM(b.total_amount) AS total
+       FROM bills b
+       LEFT JOIN documents d ON b.document_id = d.document_id
+       WHERE ${BILL_DATE_SQL} BETWEEN $1 AND $2
+         AND ${ACTIVE_BILL_FILTER}
+       GROUP BY b.category_group, b.category`,
       [startDate, endDate]
     );
 
@@ -500,40 +509,50 @@ async function getMetricsSummary(req, res) {
     const docsByStatus = await pool.query(`
       SELECT status, COUNT(*) as count
       FROM documents
+      WHERE status <> 'deleted'
+        AND uploaded_at::date BETWEEN $1 AND $2
       GROUP BY status
-    `);
+    `, [startDate, endDate]);
 
     const spendByVendor = await pool.query(`
-      SELECT COALESCE(v.vendor_name, 'Unassigned') as vendor_name, SUM(total_amount) as total
+      SELECT COALESCE(v.vendor_name, 'Unassigned') as vendor_name, SUM(b.total_amount) as total
       FROM bills b
       LEFT JOIN vendors v ON b.vendor_id = v.vendor_id
-      WHERE b.bill_date BETWEEN $1 AND $2
+      LEFT JOIN documents d ON b.document_id = d.document_id
+      WHERE ${BILL_DATE_SQL} BETWEEN $1 AND $2
+        AND ${ACTIVE_BILL_FILTER}
       GROUP BY v.vendor_name
       ORDER BY total DESC NULLS LAST
-      LIMIT 3
+      LIMIT 5
     `, [startDate, endDate]);
 
     const spendByGroup = await pool.query(`
-      SELECT COALESCE(category_group, 'OPERATING') as category_group, SUM(total_amount) as total
-      FROM bills
-      WHERE bill_date BETWEEN $1 AND $2
-      GROUP BY category_group
+      SELECT COALESCE(b.category_group, 'OPERATING') as category_group, SUM(b.total_amount) as total
+      FROM bills b
+      LEFT JOIN documents d ON b.document_id = d.document_id
+      WHERE ${BILL_DATE_SQL} BETWEEN $1 AND $2
+        AND ${ACTIVE_BILL_FILTER}
+      GROUP BY b.category_group
       ORDER BY total DESC NULLS LAST
     `, [startDate, endDate]);
 
     const spendByCategory = await pool.query(`
-      SELECT COALESCE(category, 'uncategorized') as category, SUM(total_amount) as total
-      FROM bills
-      WHERE bill_date BETWEEN $1 AND $2
-      GROUP BY category
+      SELECT COALESCE(b.category, 'misc') as category, SUM(b.total_amount) as total
+      FROM bills b
+      LEFT JOIN documents d ON b.document_id = d.document_id
+      WHERE ${BILL_DATE_SQL} BETWEEN $1 AND $2
+        AND ${ACTIVE_BILL_FILTER}
+      GROUP BY b.category
       ORDER BY total DESC NULLS LAST
     `, [startDate, endDate]);
 
     const spendByPayment = await pool.query(`
-      SELECT COALESCE(payment_method, 'UNSPECIFIED') as payment_method, SUM(total_amount) as total
-      FROM bills
-      WHERE bill_date BETWEEN $1 AND $2
-      GROUP BY payment_method
+      SELECT COALESCE(b.payment_method, 'UNSPECIFIED') as payment_method, SUM(b.total_amount) as total
+      FROM bills b
+      LEFT JOIN documents d ON b.document_id = d.document_id
+      WHERE ${BILL_DATE_SQL} BETWEEN $1 AND $2
+        AND ${ACTIVE_BILL_FILTER}
+      GROUP BY b.payment_method
       ORDER BY total DESC NULLS LAST
     `, [startDate, endDate]);
 

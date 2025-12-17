@@ -12,7 +12,11 @@ function formatMoney(val) {
 
 function formatLabel(value) {
   if (!value) return 'Unspecified';
-  return value.toString().toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const normalized = value.toString().trim().toLowerCase();
+  if (normalized === 'misc' || normalized === 'miscellaneous') {
+    return 'Misc Expenses';
+  }
+  return normalized.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function formatLocalDate(date) {
@@ -92,7 +96,7 @@ async function loadMetrics(start, end) {
 
     const docsEl = document.getElementById('docs-status');
     docsEl.innerHTML = (data.docs_by_status || []).map(d => `
-      <li>${d.status || 'unknown'}: <span class="font-semibold">${d.count}</span></li>
+      <li>${formatLabel(d.status) || 'Unknown'}: <span class="font-semibold">${d.count}</span></li>
     `).join('') || `<li class="text-slate-500">No documents</li>`;
 
     const groupEl = document.getElementById('group-body');
@@ -110,7 +114,7 @@ async function loadMetrics(start, end) {
 
     const catBody = document.getElementById('cat-body');
     catBody.innerHTML = (data.spend_by_category || []).map(c => `
-      <tr><td class="py-1">${c.category || 'uncategorized'}</td><td class="py-1 text-right">${formatMoney(c.total)}</td></tr>
+      <tr><td class="py-1">${formatLabel(c.category || 'uncategorized')}</td><td class="py-1 text-right">${formatMoney(c.total)}</td></tr>
     `).join('') || `<tr><td colspan="2" class="py-2 text-slate-500">No category spend</td></tr>`;
 
     const payBody = document.getElementById('pay-body');

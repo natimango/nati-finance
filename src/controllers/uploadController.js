@@ -8,6 +8,7 @@ const sharp = require('sharp');
 const { extractWithRules } = require('../services/ruleExtractor');
 const { parseInvoiceText } = require('../services/aiParser');
 const { normalizeCategory } = require('../utils/categoryMap');
+const { safeParseJSON } = require('../utils/json');
 
 const uploadDir = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -15,16 +16,6 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 const DEFAULT_JOURNAL_USER_ID = parseInt(process.env.SYSTEM_USER_ID || '1', 10);
-
-function safeParseJSON(value) {
-  if (!value) return null;
-  if (typeof value === 'object') return value;
-  try {
-    return JSON.parse(value);
-  } catch (err) {
-    return null;
-  }
-}
 
 function resolveJournalUser(preferred) {
   return preferred || DEFAULT_JOURNAL_USER_ID;
@@ -236,6 +227,20 @@ function hasActionablePaymentTerms(terms) {
 async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMethod = 'UNSPECIFIED') {
   try {
     console.log(`\n🤖 AI Processing: ${document.file_name}`);
+    const manualGemini = safeParseJSON(document.gemini_data);
+    if (manualGemini?.manual) {
+      console.log(`Skipping AI for document ${document.document_id} because it has a manual override.`);
+      return;
+    }
+    const existingBillCheck = await pool.query(
+      'SELECT confidence_score FROM bills WHERE document_id = $1',
+      [document.document_id]
+    );
+    const hasManualLock = existingBillCheck.rows.some(row => parseFloat(row.confidence_score || 0) >= 0.99);
+    if (hasManualLock) {
+      console.log(`Skipping AI for document ${document.document_id} because a manual bill already exists.`);
+      return;
+    }
     let rawText = rawTextFromPreprocess;
 
     // If we have no usable text, try preprocessing again

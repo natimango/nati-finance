@@ -4,6 +4,7 @@ const { preprocessFile } = require('../services/preprocessService');
 const fs = require('fs');
 const path = require('path');
 const { normalizeCategory } = require('../utils/categoryMap');
+const { safeParseJSON } = require('../utils/json');
 
 const DEFAULT_JOURNAL_USER_ID = parseInt(process.env.SYSTEM_USER_ID || '1', 10);
 const resolveJournalUser = (preferred) => preferred || DEFAULT_JOURNAL_USER_ID;
@@ -52,6 +53,17 @@ async function processBillWithAI(req, res) {
     }
     
     const document = docResult.rows[0];
+    const parsedGemini = safeParseJSON(document.gemini_data);
+    const existingBill = await pool.query(
+      'SELECT confidence_score FROM bills WHERE document_id = $1',
+      [document_id]
+    );
+    const manualLocked =
+      (parsedGemini && parsedGemini.manual === true) ||
+      existingBill.rows.some(row => parseFloat(row.confidence_score || 0) >= 0.99);
+    if (manualLocked) {
+      return res.status(409).json({ error: 'Bill already finalized manually. Use manual edit to update this record.' });
+    }
 
     // Try to reuse preprocessed raw text if present
     if (document.gemini_data && document.gemini_data.raw_text) {
@@ -726,8 +738,12 @@ async function processBillManual(req, res) {
     // Update document status and stash manual data
     await pool.query(
       `UPDATE documents 
-       SET status = $1, gemini_data = $2, notes = COALESCE($3, notes)
-       WHERE document_id = $4`,
+       SET status = $1,
+           gemini_data = $2,
+           notes = COALESCE($3, notes),
+           document_category = $4,
+           payment_method = COALESCE($5, payment_method)
+       WHERE document_id = $6`,
       [
         'processed',
         JSON.stringify({
@@ -747,6 +763,8 @@ async function processBillManual(req, res) {
           payment_terms: payment_terms || null
         }),
         notes || null,
+        normalizedCategory || document.document_category || 'misc',
+        normalizedPayment,
         document_id
       ]
     );
