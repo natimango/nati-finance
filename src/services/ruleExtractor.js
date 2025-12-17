@@ -59,6 +59,12 @@ function extractDateCandidates(text) {
     if (normalized) matches.push(normalized);
   }
 
+  const contextRegex = /(bill\s+date|invoice\s+date|dated|date\s*[:\-]|payment\s+date|paid\s+on|amount\s+paid\s+on|transaction\s+date|txn\s+date)\s*(?:[:\-]|\s)?([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})/gi;
+  while ((m = contextRegex.exec(text)) !== null) {
+    const normalized = normalizeNumericDate(m[2]);
+    if (normalized) matches.push(normalized);
+  }
+
   return [...new Set(matches)];
 }
 
@@ -67,15 +73,50 @@ function normalizeNumericDate(str) {
   const parts = cleaned.split(/[-/\.]/).map(p => parseInt(p, 10)).filter(n => !Number.isNaN(n));
   if (parts.length !== 3) return null;
   let [a, b, c] = parts;
+
+  const coerceYear = (value) => {
+    if (value < 100) {
+      // Treat small numbers as 2000+; large two-digit (>=90) more likely 1900s.
+      return value >= 90 ? value + 1900 : value + 2000;
+    }
+    return value;
+  };
+
+  const inRange = (year) => year >= 1900 && year <= 2100;
+
+  let year;
+  let month;
+  let day;
+
   if (a > 1900) {
-    if (c < 100) c += 2000;
-    return `${a}-${pad(b)}-${pad(c)}`;
+    year = a;
+    month = b;
+    day = c;
+  } else if (c > 1900) {
+    year = c;
+    month = b;
+    day = a;
+  } else {
+    year = coerceYear(c);
+    if (!inRange(year)) return null;
+    if (a > 12 && b <= 12) {
+      day = a;
+      month = b;
+    } else if (b > 12 && a <= 12) {
+      day = b;
+      month = a;
+    } else {
+      // Default to DD/MM layout (most Indian bills)
+      day = a;
+      month = b;
+    }
   }
-  if (c > 1900) {
-    if (c < 100) c += 2000;
-    return `${c}-${pad(b)}-${pad(a)}`;
-  }
-  return null;
+
+  year = coerceYear(year);
+  if (!inRange(year)) return null;
+  if (!isValidMonthDay(month, day)) return null;
+
+  return `${year}-${pad(month)}-${pad(day)}`;
 }
 
 function normalizeTextualDate(dayStr, monthStr, yearStr) {
@@ -94,6 +135,16 @@ function normalizeTextualDate(dayStr, monthStr, yearStr) {
 
 function pad(n) {
   return String(n).padStart(2, '0');
+}
+
+function isValidMonthDay(month, day) {
+  if (!month || !day) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+  const thirtyDayMonths = [4, 6, 9, 11];
+  if (thirtyDayMonths.includes(month) && day > 30) return false;
+  if (month === 2 && day > 29) return false;
+  return true;
 }
 
 function extractCurrencyCandidates(lines) {

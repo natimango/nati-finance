@@ -319,21 +319,24 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
       0
     );
 
-    if (!vendorName || !totalAmount || Number.isNaN(totalAmount)) {
+    if (!totalAmount || Number.isNaN(totalAmount) || totalAmount <= 0) {
       await pool.query(
         'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
-        ['manual_required', 'AI could not extract vendor/total reliably', document.document_id]
+        ['manual_required', 'AI could not extract total amount reliably', document.document_id]
       );
       return;
     }
 
+    const finalBillDate = rawData.bill_date || document.bill_date || null;
+    const finalVendorName = vendorName || document.vendor_name || document.bill_vendor_name || null;
+
     const data = {
-      vendor_name: vendorName,
+      vendor_name: finalVendorName,
       bill_number: rawData.bill_number || null,
-      bill_date: rawData.bill_date || null,
+      bill_date: finalBillDate,
       amounts: {
-        subtotal: totalAmount,
-        tax_amount: 0,
+        subtotal: rawData?.amounts?.subtotal || totalAmount,
+        tax_amount: rawData?.amounts?.tax_amount || 0,
         total: totalAmount
       },
       payment_terms: null,
@@ -343,7 +346,11 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
     console.log('✓ Extracted:', data.vendor_name, '₹' + data.amounts.total);
 
     // Respect user-selected category first; AI suggestion only fills gaps
-    const chosenCategory = document.document_category || data.category || 'misc';
+    const chosenCategory =
+      document.document_category ||
+      data.category ||
+      rawData.category ||
+      'misc';
     const categoryInfo = normalizeCategory(chosenCategory);
     data.category = categoryInfo.category;
     data.category_group = categoryInfo.category_group;
@@ -358,12 +365,15 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
 
     // Update document with extracted data
     await pool.query(
-      'UPDATE documents SET gemini_data = $1, status = $2, payment_method = COALESCE(payment_method, $3) WHERE document_id = $4',
-      [JSON.stringify(data), 'processed', effectivePayment, document.document_id]
+      'UPDATE documents SET gemini_data = $1, status = $2 WHERE document_id = $3',
+      [JSON.stringify(data), 'processed', document.document_id]
     );
     
     // Create/update vendor
-    let vendorId = await createOrUpdateVendor(data);
+    let vendorId = null;
+    if (finalVendorName) {
+      vendorId = await createOrUpdateVendor(data);
+    }
     
     // Upsert bill for this document
     const billUpsert = await pool.query(
@@ -387,7 +397,7 @@ async function processDocumentWithAI(document, rawTextFromPreprocess, paymentMet
           payment_method = EXCLUDED.payment_method
        RETURNING bill_id`,
       [
-        document.document_id, vendorId, data.bill_number || null, data.bill_date || new Date(),
+        document.document_id, vendorId, data.bill_number || null, data.bill_date || document.bill_date || null,
         data.amounts?.subtotal || 0, data.amounts?.tax_amount || 0, data.amounts?.total || 0,
         data.category || document.document_category || 'misc',
         categoryInfo.category_group,
@@ -865,7 +875,7 @@ async function rerunAIForDocuments(req, res) {
     if (role === 'uploader') {
       return res.status(403).json({ error: 'Only managers/admins can re-run AI processing' });
     }
-    const { limit = 50, scope = 'missing_dates' } = req.body || {};
+    const { limit = 50, scope = 'all' } = req.body || {};
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
     const conditions = [`COALESCE(d.status, 'uploaded') <> 'deleted'`];
     if (scope === 'pending') {
@@ -897,6 +907,7 @@ async function rerunAIForDocuments(req, res) {
     let skipped = 0;
     let datesUpdated = 0;
     let datesStillMissing = 0;
+    let flaggedManual = 0;
     for (const row of docsResult.rows) {
       const gemData = safeParseJSON(row.gemini_data);
       const manualLocked =
@@ -923,6 +934,11 @@ async function rerunAIForDocuments(req, res) {
         datesUpdated += 1;
       } else {
         datesStillMissing += 1;
+        flaggedManual += 1;
+        await pool.query(
+          'UPDATE documents SET status = $1, notes = COALESCE(notes, $2) WHERE document_id = $3',
+          ['manual_required', 'Bill date missing after AI re-run', row.document_id]
+        );
       }
     }
     res.json({
@@ -931,7 +947,8 @@ async function rerunAIForDocuments(req, res) {
       processed,
       skipped_manual: skipped,
       dates_updated: datesUpdated,
-      dates_still_missing: datesStillMissing
+      dates_still_missing: datesStillMissing,
+      flagged_manual: flaggedManual
     });
   } catch (error) {
     console.error('Rerun AI error:', error);

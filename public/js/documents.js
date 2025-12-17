@@ -97,11 +97,19 @@ async function triggerRerunAI() {
         const resp = await authFetch(`${API_URL}/documents/reprocess`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ limit, scope: 'missing_dates' })
+            body: JSON.stringify({ limit, scope: 'all' })
         });
         const data = await resp.json();
         if (!resp.ok || data.error) throw new Error(data.error || 'Failed to re-run AI');
-        alert(`AI re-run completed. Checked: ${data.scanned}, updated: ${data.processed}, skipped manual: ${data.skipped_manual}`);
+        alert([
+            `AI re-run completed.`,
+            `Checked: ${data.scanned}`,
+            `Processed: ${data.processed}`,
+            `Skipped (manual locked): ${data.skipped_manual}`,
+            `Dates updated: ${data.dates_updated}`,
+            `Still missing: ${data.dates_still_missing}`,
+            `Flagged for manual review: ${data.flagged_manual}`
+        ].join('\n'));
         await loadDocuments();
     } catch (error) {
         console.error('Re-run AI error', error);
