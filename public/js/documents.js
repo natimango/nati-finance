@@ -81,6 +81,37 @@ function displayDocuments(documents) {
     renderTable(documents);
 }
 
+async function triggerRerunAI() {
+    const btn = document.getElementById('rerun-ai-btn');
+    if (!btn) return;
+    if (!confirm('Re-run AI on recent bills? Manual overrides will be respected.')) return;
+    let limit = prompt('How many documents should be rechecked? (1-500)', '50');
+    if (limit === null) return;
+    limit = parseInt(limit, 10);
+    if (Number.isNaN(limit) || limit <= 0) limit = 50;
+    limit = Math.min(Math.max(limit, 1), 500);
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>Running...</span>';
+    try {
+        const resp = await authFetch(`${API_URL}/documents/reprocess`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ limit, scope: 'all' })
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'Failed to re-run AI');
+        alert(`AI re-run completed. Checked: ${data.scanned}, updated: ${data.processed}, skipped manual: ${data.skipped_manual}`);
+        await loadDocuments();
+    } catch (error) {
+        console.error('Re-run AI error', error);
+        alert(`Re-run AI failed: ${error.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = original;
+    }
+}
+
 function renderTable(documents) {
     const body = document.getElementById('documents-table-body');
     if (!body) return;

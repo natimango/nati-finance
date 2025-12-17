@@ -859,10 +859,74 @@ const deleteDocument = async (req, res) => {
   }
 };
 
+async function rerunAIForDocuments(req, res) {
+  try {
+    const role = req.user?.role || 'uploader';
+    if (role === 'uploader') {
+      return res.status(403).json({ error: 'Only managers/admins can re-run AI processing' });
+    }
+    const { limit = 50, scope = 'all' } = req.body || {};
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
+    let where = `WHERE COALESCE(d.status, 'uploaded') <> 'deleted'`;
+    if (scope === 'pending') {
+      where += ` AND COALESCE(d.status, 'uploaded') IN ('uploaded','processing','manual_required')`;
+    }
+    const docsResult = await pool.query(
+      `SELECT d.*, 
+              info.payment_method AS effective_payment_method,
+              info.drop_name AS effective_drop_name,
+              info.confidence_score AS bill_confidence
+       FROM documents d
+       LEFT JOIN LATERAL (
+         SELECT payment_method, drop_name, confidence_score
+         FROM bills
+         WHERE document_id = d.document_id
+         ORDER BY bill_id DESC
+         LIMIT 1
+       ) info ON true
+       ${where}
+       ORDER BY d.uploaded_at DESC
+       LIMIT $1`,
+      [lim]
+    );
+    let processed = 0;
+    let skipped = 0;
+    for (const row of docsResult.rows) {
+      const gemData = safeParseJSON(row.gemini_data);
+      const manualLocked =
+        (gemData && gemData.manual === true) ||
+        (row.bill_confidence && parseFloat(row.bill_confidence) >= 0.99);
+      if (manualLocked) {
+        skipped += 1;
+        continue;
+      }
+      const rawText = gemData?.raw_text || null;
+      const effectivePayment = row.effective_payment_method || row.payment_method || 'UNSPECIFIED';
+      const docPayload = {
+        ...row,
+        payment_method: effectivePayment,
+        drop_name: row.effective_drop_name || null
+      };
+      await processDocumentWithAI(docPayload, rawText, effectivePayment);
+      processed += 1;
+    }
+    res.json({
+      success: true,
+      scanned: docsResult.rowCount,
+      processed,
+      skipped_manual: skipped
+    });
+  } catch (error) {
+    console.error('Rerun AI error:', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
 module.exports = {
   upload,
   uploadBill,
   getDocuments,
   getDocument,
-  deleteDocument
+  deleteDocument,
+  rerunAIForDocuments
 };

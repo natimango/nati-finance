@@ -7,7 +7,8 @@ const {
   uploadBill, 
   getDocuments, 
   getDocument,
-  deleteDocument 
+  deleteDocument,
+  rerunAIForDocuments
 } = require('../controllers/uploadController');
 const { authorize } = require('../middleware/auth');
 
@@ -24,6 +25,9 @@ router.get('/documents/:id', getDocument);
 
 // Delete document
 router.delete('/documents/:id', deleteDocument);
+
+// Re-run AI processing
+router.post('/documents/reprocess', rerunAIForDocuments);
 
 // View/Download file
 router.get('/files/:id', async (req, res) => {
