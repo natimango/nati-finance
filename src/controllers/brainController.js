@@ -1,9 +1,11 @@
 const pool = require('../config/database');
+const { getContributionMarginData } = require('../services/skuCostService');
 
 const ALERT_TYPES = {
   agedNeedsReview: 'DOC_NEEDS_REVIEW_AGED',
   lowQuality: 'DOC_LOW_QUALITY',
   highValue: 'DOC_HIGH_VALUE_NEEDS_REVIEW',
+  duplicateFile: 'DOC_DUPLICATE_FILE',
   budgetVariance: 'BUDGET_VARIANCE'
 };
 const HIGH_VALUE_THRESHOLD = 5000;
@@ -165,6 +167,53 @@ async function evaluateVerificationAlerts(actor = 'system') {
     });
   }
   await resolveClearedDocumentAlerts(ALERT_TYPES.highValue, highValueIds, actor);
+
+  const duplicateResult = await pool.query(
+    `
+    WITH duplicates AS (
+      SELECT file_hash, COUNT(*) AS occurrences
+      FROM documents
+      WHERE file_hash IS NOT NULL
+        AND file_hash <> ''
+        AND COALESCE(status, 'uploaded') <> 'deleted'
+      GROUP BY file_hash
+      HAVING COUNT(*) > 1
+    )
+    SELECT d.document_id,
+           d.file_name,
+           d.uploaded_at,
+            d.file_hash,
+            dup.occurrences,
+            v.vendor_name,
+            b.bill_id,
+            b.bill_number
+    FROM duplicates dup
+    JOIN documents d ON d.file_hash = dup.file_hash
+    LEFT JOIN bills b ON b.document_id = d.document_id
+    LEFT JOIN vendors v ON v.vendor_id = b.vendor_id
+    ORDER BY dup.occurrences DESC, d.uploaded_at DESC
+    LIMIT 50
+    `
+  );
+  const duplicateIds = [];
+  for (const row of duplicateResult.rows) {
+    duplicateIds.push(row.document_id);
+    const baseLabel = row.vendor_name || 'Vendor';
+    const message = `${baseLabel} • Duplicate file hash (${row.file_hash}) seen ${row.occurrences}x`;
+    created += await upsertDocumentAlert({
+      alertType: ALERT_TYPES.duplicateFile,
+      severity: 'warning',
+      message,
+      documentId: row.document_id,
+      billId: row.bill_id || null,
+      metadata: {
+        file_hash: row.file_hash,
+        bill_number: row.bill_number || null,
+        occurrences: Number(row.occurrences || 0)
+      }
+    });
+  }
+  await resolveClearedDocumentAlerts(ALERT_TYPES.duplicateFile, duplicateIds, actor);
 
   return created;
 }
@@ -349,7 +398,7 @@ async function getSkuOverview(req, res) {
 // Simple watchdog: duplicate invoice numbers per vendor + oversized bills.
 async function getWatchdog(req, res) {
   try {
-    const [dupes, oversized, staleDocs, agedUnpaid, budgetsOpen] = await Promise.all([
+    const [billDupes, fileDupes, oversized, staleDocs, agedUnpaid, budgetsOpen] = await Promise.all([
       pool.query(
         `
         SELECT v.vendor_name, bill_number, COUNT(*) AS count
@@ -360,6 +409,27 @@ async function getWatchdog(req, res) {
         GROUP BY v.vendor_name, bill_number
         HAVING COUNT(*) > 1
         ORDER BY count DESC, v.vendor_name
+        LIMIT 25
+        `
+      ),
+      pool.query(
+        `
+        SELECT
+          d.file_hash,
+          COUNT(*) AS count,
+          MAX(d.uploaded_at) AS latest_uploaded_at,
+          (ARRAY_AGG(COALESCE(v.vendor_name, 'Unassigned') ORDER BY d.uploaded_at DESC))[1] AS vendor_name,
+          (ARRAY_AGG(b.bill_number ORDER BY d.uploaded_at DESC))[1] AS bill_number,
+          (ARRAY_AGG(d.file_name ORDER BY d.uploaded_at DESC))[1] AS file_name
+        FROM documents d
+        LEFT JOIN bills b ON b.document_id = d.document_id
+        LEFT JOIN vendors v ON v.vendor_id = b.vendor_id
+        WHERE COALESCE(d.status, 'uploaded') <> 'deleted'
+          AND d.file_hash IS NOT NULL
+          AND d.file_hash <> ''
+        GROUP BY d.file_hash
+        HAVING COUNT(*) > 1
+        ORDER BY COUNT(*) DESC, MAX(d.uploaded_at) DESC
         LIMIT 25
         `
       ),
@@ -421,15 +491,31 @@ async function getWatchdog(req, res) {
         `
       )
     ]);
+    const duplicateRows = [
+      ...billDupes.rows.map(row => ({
+        vendor_name: row.vendor_name,
+        bill_number: row.bill_number,
+        count: Number(row.count) || 0,
+        is_file_duplicate: false
+      })),
+      ...fileDupes.rows.map(row => ({
+        vendor_name: row.vendor_name,
+        bill_number: row.bill_number,
+        file_name: row.file_name,
+        count: Number(row.count) || 0,
+        is_file_duplicate: true
+      }))
+    ].sort((a, b) => b.count - a.count);
+
     res.json({
       summary: {
-        duplicates: dupes.rowCount,
+        duplicates: billDupes.rowCount + fileDupes.rowCount,
         oversized: oversized.rowCount,
         stale_manual: staleDocs.rowCount,
         aged_unpaid: agedUnpaid.rowCount,
         budget: budgetsOpen.rowCount
       },
-      duplicates: dupes.rows,
+      duplicates: duplicateRows,
       oversized: oversized.rows,
       stale_manual: staleDocs.rows,
       aged_unpaid: agedUnpaid.rows,
@@ -516,6 +602,247 @@ async function runBudgetAlerts(req, res) {
   } catch (err) {
     console.error('runBudgetAlerts error', err);
     res.status(500).json({ error: 'Failed to evaluate budgets' });
+  }
+}
+
+async function getAlertSummary(req, res) {
+  try {
+    const threshold = Number(process.env.HIGH_VALUE_ALERT_THRESHOLD || HIGH_VALUE_THRESHOLD);
+    const docUnposted = await pool.query(
+      `
+      WITH unposted AS (
+        SELECT d.document_id, d.uploaded_at,
+               SUM(bi.amount) AS unposted_amount
+        FROM bill_items bi
+        JOIN bills b ON b.bill_id = bi.bill_id
+        JOIN documents d ON d.document_id = b.document_id
+        WHERE bi.is_postable
+          AND bi.posting_status <> 'posted'
+        GROUP BY d.document_id, d.uploaded_at
+      )
+      SELECT
+        COUNT(*) AS total_unposted_docs,
+        COALESCE(SUM(unposted_amount), 0) AS unposted_amount,
+        COUNT(*) FILTER (WHERE uploaded_at < NOW() - INTERVAL '24 HOURS') AS aged_unposted_docs
+      FROM unposted
+      `
+    );
+
+    const highValue = await pool.query(
+      `
+      WITH unposted AS (
+        SELECT d.document_id, SUM(bi.amount) AS unposted_amount
+        FROM bill_items bi
+        JOIN bills b ON b.bill_id = bi.bill_id
+        JOIN documents d ON d.document_id = b.document_id
+        WHERE bi.is_postable
+          AND bi.posting_status <> 'posted'
+        GROUP BY d.document_id
+      )
+      SELECT
+        COUNT(*) AS high_value_docs,
+        COALESCE(SUM(unposted_amount), 0) AS high_value_amount
+      FROM unposted
+      WHERE unposted_amount >= $1
+      `,
+      [threshold]
+    );
+
+    const goLiveUnposted = await pool.query(
+      `
+      SELECT
+        COUNT(*) AS count,
+        COALESCE(SUM(amount), 0) AS amount
+      FROM bill_items
+      WHERE is_postable
+        AND go_live_eligible
+        AND posting_status <> 'posted'
+      `
+    );
+
+    const verifiedWithUnposted = await pool.query(
+      `
+      SELECT COUNT(DISTINCT d.document_id) AS count
+      FROM documents d
+      JOIN bills b ON b.document_id = d.document_id
+      JOIN bill_items bi ON bi.bill_id = b.bill_id
+      WHERE d.verification_status = 'verified'
+        AND bi.is_postable
+        AND bi.posting_status <> 'posted'
+      `
+    );
+
+    res.json({
+      success: true,
+      summary: {
+        total_unposted_docs: Number(docUnposted.rows[0]?.total_unposted_docs || 0),
+        unposted_amount: Number(docUnposted.rows[0]?.unposted_amount || 0),
+        aged_unposted_docs: Number(docUnposted.rows[0]?.aged_unposted_docs || 0),
+        high_value_unposted_docs: Number(highValue.rows[0]?.high_value_docs || 0),
+        high_value_unposted_amount: Number(highValue.rows[0]?.high_value_amount || 0),
+        go_live_unposted_docs: Number(goLiveUnposted.rows[0]?.count || 0),
+        go_live_unposted_amount: Number(goLiveUnposted.rows[0]?.amount || 0),
+        verified_documents_with_unposted: Number(verifiedWithUnposted.rows[0]?.count || 0)
+      }
+    });
+  } catch (err) {
+    console.error('Alert summary error', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+async function getGuardrails(req, res) {
+  try {
+    const dropId = Number(req.params.dropId);
+    if (Number.isNaN(dropId)) {
+      return res.status(400).json({ success: false, error: 'dropId must be numeric' });
+    }
+
+    const dropRow = await pool.query('SELECT drop_name FROM drops WHERE drop_id = $1 AND is_active', [dropId]);
+    if (!dropRow.rows.length) {
+      return res.status(404).json({ success: false, error: 'Drop not found' });
+    }
+
+    const dropName = dropRow.rows[0].drop_name;
+    const totals = await pool.query(
+      `
+      SELECT COALESCE(SUM(amount), 0) AS total_go_live_cost
+      FROM bill_items
+      WHERE drop_id = $1
+        AND is_postable
+        AND go_live_eligible
+        AND posting_status = 'posted'
+      `,
+      [dropId]
+    );
+    const unposted = await pool.query(
+      `
+      SELECT
+        COALESCE(SUM(amount), 0) AS excluded_unposted_amount,
+        COUNT(*) AS unposted_go_live_count
+      FROM bill_items
+      WHERE drop_id = $1
+        AND is_postable
+        AND go_live_eligible
+        AND posting_status <> 'posted'
+      `,
+      [dropId]
+    );
+    const inventoryResult = await pool.query(
+      `
+      SELECT COALESCE(SUM(it.quantity), 0) AS units
+      FROM inventory_transactions it
+      JOIN products p ON p.product_id = it.product_id
+      JOIN sku_master sm ON sm.sku_code = p.sku_code
+      WHERE sm.drop_id = $1
+      `,
+      [dropId]
+    );
+    const contribution = await getContributionMarginData(dropId);
+
+    const goLiveCost = Number(totals.rows[0]?.total_go_live_cost || 0);
+    const inventoryUnits = Number(inventoryResult.rows[0]?.units || 0);
+    const blendedContribution = contribution.blended_contribution_margin || 0;
+    const breakEvenUnits =
+      blendedContribution > 0 ? Math.ceil(goLiveCost / blendedContribution) : null;
+    const allowedMarketingBudget = Number(
+      (Math.max(0, contribution.max_cac) * Math.max(1, inventoryUnits)).toFixed(2)
+    );
+
+    res.json({
+      success: true,
+      drop: { drop_id: dropId, drop_name: dropName },
+      go_live: {
+        total_go_live_cost: goLiveCost,
+        excluded_unposted_amount: Number(unposted.rows[0]?.excluded_unposted_amount || 0),
+        unposted_go_live_count: Number(unposted.rows[0]?.unposted_go_live_count || 0)
+      },
+      contribution: {
+        blended_contribution_margin: blendedContribution,
+        max_cac: contribution.max_cac,
+        target_net_margin_buffer: contribution.target_net_margin_buffer
+      },
+      inventory_units: inventoryUnits,
+      break_even_units: breakEvenUnits,
+      allowed_marketing_budget: allowedMarketingBudget,
+      go_live_payback: null
+    });
+  } catch (err) {
+    console.error('Guardrails error', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+async function checkInvariants(req, res) {
+  try {
+    const [postMissing, unposted, verifiedUnposted, duplicates] = await Promise.all([
+      pool.query(
+        `
+        SELECT COUNT(*) AS count
+        FROM bill_items
+        WHERE is_postable
+          AND posting_status = 'posted'
+          AND (coa_account_id IS NULL OR department_id IS NULL OR drop_id IS NULL)
+        `
+      ),
+      pool.query(
+        `
+        SELECT COUNT(*) AS count,
+               COALESCE(SUM(amount), 0) AS amount
+        FROM bill_items
+        WHERE is_postable
+          AND posting_status <> 'posted'
+        `
+      ),
+      pool.query(
+        `
+        SELECT COUNT(DISTINCT d.document_id) AS count
+        FROM documents d
+        JOIN bills b ON b.document_id = d.document_id
+        JOIN bill_items bi ON bi.bill_id = b.bill_id
+        WHERE d.verification_status = 'verified'
+          AND bi.is_postable
+          AND bi.posting_status <> 'posted'
+        `
+      ),
+      pool.query(
+        `
+        WITH duplicates AS (
+          SELECT file_hash
+          FROM documents
+          WHERE file_hash IS NOT NULL
+            AND file_hash <> ''
+          GROUP BY file_hash
+          HAVING COUNT(*) > 1
+        )
+        SELECT COUNT(*) AS count
+        FROM documents
+        WHERE file_hash IN (SELECT file_hash FROM duplicates)
+        `
+      )
+    ]);
+
+    const postedMissingDims = Number(postMissing.rows[0]?.count || 0);
+    const unpostedCount = Number(unposted.rows[0]?.count || 0);
+    const unpostedAmount = Number(unposted.rows[0]?.amount || 0);
+    const verifiedWithUnposted = Number(verifiedUnposted.rows[0]?.count || 0);
+    const duplicateFileHashCount = Number(duplicates.rows[0]?.count || 0);
+    const ok = postedMissingDims === 0 && verifiedWithUnposted === 0 && duplicateFileHashCount === 0;
+
+    res.json({
+      success: true,
+      invariants: {
+        posted_missing_dims: postedMissingDims,
+        unposted_postable_items: unpostedCount,
+        unposted_amount: unpostedAmount,
+        verified_documents_with_unposted: verifiedWithUnposted,
+        duplicate_file_hash_count: duplicateFileHashCount
+      },
+      ok
+    });
+  } catch (err) {
+    console.error('Invariants error', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 }
 
@@ -759,5 +1086,8 @@ module.exports = {
   getWatchdog,
   getAlerts,
   runBudgetAlerts,
+  getAlertSummary,
+  getGuardrails,
+  checkInvariants,
   getDropCostOverview
 };

@@ -22,7 +22,9 @@ async function logDocumentFieldChange({
   actorId = null,
   reason = null,
   confidence = null,
-  evidence = null
+  evidence = null,
+  operationId = null,
+  sourceAction = null
 }) {
   const oldNorm = normalizeValue(oldValue);
   const newNorm = normalizeValue(newValue);
@@ -30,9 +32,21 @@ async function logDocumentFieldChange({
   if (!documentId || !fieldName) return;
   await pool.query(
     `INSERT INTO document_field_history
-      (document_id, field_name, old_value, new_value, actor_type, actor_id, reason, confidence, evidence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [documentId, fieldName, oldNorm, newNorm, actorType, actorId, reason, confidence, evidence ? normalizeValue(evidence) : null]
+      (document_id, field_name, old_value, new_value, actor_type, actor_id, reason, confidence, evidence, operation_id, source_action)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [
+      documentId,
+      fieldName,
+      oldNorm,
+      newNorm,
+      actorType,
+      actorId,
+      reason,
+      confidence,
+      evidence ? normalizeValue(evidence) : null,
+      operationId,
+      sourceAction
+    ]
   );
 }
 

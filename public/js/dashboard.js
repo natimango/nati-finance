@@ -4,7 +4,8 @@ const ALERT_LABELS = {
     BUDGET_VARIANCE: 'Budget variance',
     DOC_NEEDS_REVIEW_AGED: 'Needs review 24h+',
     DOC_LOW_QUALITY: 'Low-quality OCR',
-    DOC_HIGH_VALUE_NEEDS_REVIEW: 'High-value needs review'
+    DOC_HIGH_VALUE_NEEDS_REVIEW: 'High-value needs review',
+    DOC_DUPLICATE_FILE: 'Duplicate file'
 };
 
 function authFetch(url, options = {}) {
@@ -202,7 +203,12 @@ function renderWatchdog(data, alerts) {
             key: 'duplicates',
             label: 'Duplicate bills',
             icon: 'fa-copy',
-            items: (data.duplicates || []).slice(0, 2).map(d => `${d.vendor_name || 'Vendor'} • #${d.bill_number || 'N/A'} (${d.count}x)`)
+            items: (data.duplicates || []).slice(0, 2).map(d => {
+                if (d.is_file_duplicate) {
+                    return `${d.vendor_name || 'Vendor'} • ${d.file_name || 'Duplicate file'} (${d.count} copies)`;
+                }
+                return `${d.vendor_name || 'Vendor'} • #${d.bill_number || 'N/A'} (${d.count}x)`;
+            })
         },
         {
             key: 'stale_manual',

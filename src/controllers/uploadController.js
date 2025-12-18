@@ -12,6 +12,8 @@ const { normalizeCategory } = require('../utils/categoryMap');
 const { safeParseJSON } = require('../utils/json');
 const { storeRawText, getRawTextFromDoc } = require('../utils/ocrCache');
 const { logDocumentFieldChange } = require('../utils/documentAudit');
+const { evidenceMatchesRawText } = require('../utils/textNormalize');
+const { getDefaultDropId } = require('../utils/metaCache');
 
 const uploadDir = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -22,6 +24,7 @@ const DEFAULT_JOURNAL_USER_ID = parseInt(process.env.SYSTEM_USER_ID || '1', 10);
 const REQUIRED_OCR_VERSION = parseInt(process.env.OCR_VERSION || '1', 10);
 const MIN_OCR_TEXT_LENGTH = Math.max(parseInt(process.env.OCR_TEXT_MIN_LEN || '200', 10), 32);
 const VERIFY_CONF_THRESHOLD = Math.min(Math.max(parseFloat(process.env.VERIFY_CONF_THRESHOLD || '0.85'), 0.5), 0.99);
+const MAX_REPROCESS_PER_DOC_PER_DAY = Math.max(parseInt(process.env.MAX_REPROCESS_PER_DOC_PER_DAY || '3', 10), 1);
 
 function resolveJournalUser(preferred) {
   return preferred || DEFAULT_JOURNAL_USER_ID;
@@ -244,6 +247,58 @@ function normalizeISODate(value) {
   return parsed.toISOString().slice(0, 10);
 }
 
+function isSameUtcDay(a, b) {
+  if (!a || !b) return false;
+  return a.getUTCFullYear() === b.getUTCFullYear()
+    && a.getUTCMonth() === b.getUTCMonth()
+    && a.getUTCDate() === b.getUTCDate();
+}
+
+function canAttemptReprocess(doc) {
+  if (!doc) return true;
+  const lastAttempt = doc.ai_last_attempt_at ? new Date(doc.ai_last_attempt_at) : null;
+  if (!lastAttempt) return true;
+  if (!isSameUtcDay(lastAttempt, new Date())) return true;
+  return (doc.ai_attempt_count || 0) < MAX_REPROCESS_PER_DOC_PER_DAY;
+}
+
+async function recordAiAttempt(documentId, error) {
+  const errorText = error ? (error.message || error || '').toString().slice(0, 400) : null;
+  await pool.query(
+    `UPDATE documents
+        SET ai_attempt_count = COALESCE(ai_attempt_count, 0) + 1,
+            ai_last_attempt_at = NOW(),
+            ai_last_error = $1
+      WHERE document_id = $2`,
+    [errorText, documentId]
+  );
+}
+
+async function updateDocumentMetadata(documentId, { mimeType, fileSize, pageCount }) {
+  if (!documentId) return;
+  await pool.query(
+    `
+    UPDATE documents
+    SET mime_type = COALESCE($1, mime_type),
+        file_size_bytes = COALESCE($2, file_size_bytes),
+        page_count = COALESCE($3, page_count)
+    WHERE document_id = $4
+    `,
+    [mimeType || null, fileSize || null, pageCount || null, documentId]
+  );
+}
+
+function shouldPromoteToVerified({ hasBillDate, hasTotal, lockedDate, lockedTotal }) {
+  return hasBillDate && hasTotal && lockedDate && lockedTotal;
+}
+
+function determineVerificationSource(actorType) {
+  if (!actorType) return 'system';
+  if (actorType === 'user') return 'manual';
+  if (actorType === 'manager' || actorType === 'admin') return 'manual';
+  return actorType;
+}
+
 function normalizeHeuristicCandidates(raw) {
   if (!Array.isArray(raw)) return [];
   return raw.map((entry) => {
@@ -428,24 +483,12 @@ function pickBestTotalCandidate(heuristics) {
   return { value: asNumberOrNull(first), evidence: first, confidence: null };
 }
 
-function normalizeSearchableText(text) {
-  if (!text) return '';
-  return text.toLowerCase().replace(/\s+/g, ' ').trim();
-}
-
-function evidenceMatchesText(evidence, normalizedText) {
-  if (!evidence || !normalizedText) return false;
-  const snippet = evidence.toString().toLowerCase().replace(/\s+/g, ' ').trim();
-  if (!snippet || snippet.length < 3) return false;
-  return normalizedText.includes(snippet);
-}
-
-function canUseAiCandidate(candidate, normalizedText, threshold) {
+function canUseAiCandidate(candidate, rawText, threshold) {
   if (!candidate || candidate.value === null || candidate.value === undefined) return false;
   if (candidate.confidence === null || candidate.confidence === undefined) return false;
   if (candidate.confidence < threshold) return false;
   if (!candidate.evidence) return false;
-  return evidenceMatchesText(candidate.evidence, normalizedText);
+  return evidenceMatchesRawText(rawText || '', candidate.evidence);
 }
 
 function resolveVerificationReason({ hasBillDate, hasTotal, qualityScore, aiConfidence, heuristics }) {
@@ -507,14 +550,19 @@ function buildVerificationSnapshot(row = {}) {
   const hasRawText = Boolean(row.raw_text);
 
   const storedReason = row.verification_reason || null;
-  const reason = storedReason || resolveVerificationReason({
+  let reason = storedReason || resolveVerificationReason({
     hasBillDate,
     hasTotal,
     qualityScore,
     aiConfidence,
     heuristics
   });
+  if (hasUnposted) {
+    reason = reason || 'Unposted spend';
+  }
 
+  const unpostedAmount = Number(row.unposted_amount || 0);
+  const hasUnposted = unpostedAmount > 0;
   const isProcessing = !hasRawText || !['processed', 'manual_required'].includes(docStatus);
   let status;
   if (isProcessing) {
@@ -552,6 +600,7 @@ function buildVerificationSnapshot(row = {}) {
 
   return {
     status,
+    unposted_amount: unpostedAmount > 0 ? unpostedAmount : null,
     quality_score: qualityScore != null ? qualityScore : null,
     bill_date_locked: lockedDate,
     total_locked: lockedTotal,
@@ -572,6 +621,8 @@ async function processDocumentWithAI(
 ) {
   const actorType = actorContext.actorType || 'system';
   const actorId = actorContext.actorId || null;
+  const operationId = crypto.randomUUID();
+  const sourceAction = actorContext.sourceAction || (actorType === 'system' ? 'upload_auto' : 'reprocess');
   const docBillDateLocked = Boolean(document.bill_date_locked);
   const docTotalLocked = Boolean(document.total_locked);
 
@@ -655,6 +706,8 @@ async function processDocumentWithAI(
       heuristics: heuristicsSeed
     });
 
+    await recordAiAttempt(document.document_id, extraction.success ? null : extraction.error);
+
     if (!extraction.success && heuristicsSeed && heuristicsSeed.amounts?.total) {
       extraction = {
         success: true,
@@ -688,7 +741,6 @@ async function processDocumentWithAI(
       rawData.merchant ||
       null;
 
-    const normalizedRawText = normalizeSearchableText(rawText);
     const heuristicDate = pickBestDateCandidate(heuristics);
     const heuristicTotal = pickBestTotalCandidate(heuristics);
     const aiBillDateCandidate = aiSummary ? normalizeAiField(aiSummary.bill_date) : { value: null, confidence: null, evidence: null };
@@ -708,7 +760,7 @@ async function processDocumentWithAI(
 
     let resolvedBillDate = previousBillDate || rawData.bill_date || document.bill_date || null;
     if (!billDateLocked) {
-      if (canUseAiCandidate(aiBillDateCandidate, normalizedRawText, VERIFY_CONF_THRESHOLD)) {
+      if (canUseAiCandidate(aiBillDateCandidate, rawText, VERIFY_CONF_THRESHOLD)) {
         resolvedBillDate = aiBillDateCandidate.value;
         fieldEvidence.bill_date = { source: 'ai', evidence: aiBillDateCandidate.evidence, confidence: aiBillDateCandidate.confidence };
       } else if (!resolvedBillDate && heuristicDate?.value) {
@@ -724,7 +776,7 @@ async function processDocumentWithAI(
       : asNumberOrNull(rawData?.amounts?.total ?? rawData.total_amount ?? rawData.total);
 
     if (!billTotalLocked) {
-      if (canUseAiCandidate(aiTotalCandidate, normalizedRawText, VERIFY_CONF_THRESHOLD)) {
+      if (canUseAiCandidate(aiTotalCandidate, rawText, VERIFY_CONF_THRESHOLD)) {
         resolvedTotal = asNumberOrNull(aiTotalCandidate.value);
         fieldEvidence.total_amount = { source: 'ai', evidence: aiTotalCandidate.evidence, confidence: aiTotalCandidate.confidence };
       } else if (!resolvedTotal && heuristicTotal?.value) {
@@ -834,11 +886,28 @@ async function processDocumentWithAI(
       aiConfidence,
       heuristics
     });
-    const verificationStatus = (hasBillDate && hasTotal && !verificationReason) ? 'unverified' : 'needs_review';
+    const isVerified = shouldPromoteToVerified({ hasBillDate, hasTotal, lockedDate: billDateLocked, lockedTotal: billTotalLocked });
+    const verificationStatus = isVerified
+      ? 'verified'
+      : (verificationReason ? 'needs_review' : 'unverified');
+    const verifiedAt = isVerified ? new Date().toISOString() : null;
+    const verifiedBy = isVerified ? (actorId || DEFAULT_JOURNAL_USER_ID) : null;
+    const verificationSource = isVerified ? determineVerificationSource(actorType) : null;
 
     await pool.query(
-      'UPDATE documents SET gemini_data = $1, status = $2, extraction_state = $3, quality_score = $4, verification_status = $5, verification_reason = $6 WHERE document_id = $7',
-      [JSON.stringify(data), 'processed', JSON.stringify(extractionState), qualityScore, verificationStatus, verificationReason, document.document_id]
+      'UPDATE documents SET gemini_data = $1, status = $2, extraction_state = $3, quality_score = $4, verification_status = $5, verification_reason = $6, verified_at = $7, verified_by_user_id = $8, verification_source = $9 WHERE document_id = $10',
+      [
+        JSON.stringify(data),
+        'processed',
+        JSON.stringify(extractionState),
+        qualityScore,
+        verificationStatus,
+        verificationReason,
+        verifiedAt,
+        verifiedBy,
+        verificationSource,
+        document.document_id
+      ]
     );
 
     let vendorId = null;
@@ -903,7 +972,9 @@ async function processDocumentWithAI(
         actorId,
         reason: billDateReason,
         confidence: billDateConfidence,
-        evidence: billDateEvidence
+        evidence: billDateEvidence,
+        operationId,
+        sourceAction
       });
     }
     if (!billTotalLocked && updatedTotal && updatedTotal !== previousTotal) {
@@ -922,25 +993,38 @@ async function processDocumentWithAI(
         actorId,
         reason: totalReason,
         confidence: totalConfidence,
-        evidence: totalEvidence
+        evidence: totalEvidence,
+        operationId,
+        sourceAction
       });
     }
 
     await pool.query('DELETE FROM bill_items WHERE bill_id = $1', [billId]);
+    const defaultDropId = await getDefaultDropId();
     if (data.line_items && data.line_items.length > 0) {
       for (let i = 0; i < data.line_items.length; i += 1) {
         const item = data.line_items[i];
         await pool.query(
-          `INSERT INTO bill_items (bill_id, description, quantity, unit_price, amount, line_number)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [billId, item.description, item.quantity || 0, item.rate || 0, item.amount || 0, i + 1]
+          `INSERT INTO bill_items (bill_id, description, quantity, unit_price, amount, line_number, drop_id, is_postable, posting_status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            billId,
+            item.description,
+            item.quantity || 0,
+            item.rate || 0,
+            item.amount || 0,
+            i + 1,
+            item.drop_id || defaultDropId,
+            item.is_postable === false ? false : true,
+            'unposted'
+          ]
         );
       }
     }
 
     const scheduleCreated = await createPaymentSchedule(billId, {
       bill_date: data.bill_date || document.bill_date,
-      amounts: data.amounts || { total: persistedTotal || 0 },
+      amounts: data.amounts || { total: resolvedTotal || 0 },
       payment_terms: data.payment_terms
     });
     const paymentStatus = scheduleCreated ? 'pending' : 'paid';
@@ -1193,7 +1277,9 @@ const getDocuments = async (req, res) => {
         pt.payment_type AS bill_payment_type,
         pt.advance_percentage AS bill_advance_percentage,
         pt.terms_text AS bill_payment_terms_text,
-        ps.due_date AS bill_payment_due_date
+        ps.due_date AS bill_payment_due_date,
+        COALESCE(unposted.unposted_amount, 0) AS unposted_amount,
+        COALESCE(unposted.unposted_count, 0) AS unposted_line_count
        FROM documents d
        LEFT JOIN bills b ON b.document_id = d.document_id
        LEFT JOIN vendors v ON b.vendor_id = v.vendor_id
@@ -1211,6 +1297,24 @@ const getDocuments = async (req, res) => {
          ORDER BY due_date ASC
          LIMIT 1
        ) ps ON true
+       LEFT JOIN LATERAL (
+         SELECT
+           COUNT(*) FILTER (WHERE bi.is_postable AND bi.posting_status <> 'posted') AS unposted_count,
+           COALESCE(SUM(bi.amount) FILTER (WHERE bi.is_postable AND bi.posting_status <> 'posted'), 0) AS unposted_amount
+         FROM bill_items bi
+         WHERE bi.bill_id = b.bill_id
+       ) unposted ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS missing_dims_count
+          FROM bill_items bi
+          WHERE bi.bill_id = b.bill_id
+            AND bi.is_postable
+            AND (
+              bi.coa_account_id IS NULL
+              OR bi.department_id IS NULL
+              OR bi.drop_id IS NULL
+            )
+        ) dims ON true
        ORDER BY d.uploaded_at DESC`
     );
     const userId = req.user?.userId;
@@ -1244,6 +1348,7 @@ const getDocuments = async (req, res) => {
         can_manual: canManageAll,
         can_process: canManageAll,
         verification
+        ,missing_dimensions: row.missing_dims_count || 0
       };
     });
 
@@ -1493,6 +1598,7 @@ async function rerunAIForDocuments(req, res) {
     let datesUpdated = 0;
     let datesStillMissing = 0;
     let flaggedManual = 0;
+    let blockedRetry = 0;
     for (const row of docsResult.rows) {
       const gemData = safeParseJSON(row.gemini_data);
       if (gemData) {
@@ -1501,6 +1607,10 @@ async function rerunAIForDocuments(req, res) {
       const manualLocked =
         (gemData && gemData.manual === true) ||
         (row.bill_confidence && parseFloat(row.bill_confidence) >= 0.99);
+      if (!canAttemptReprocess(row)) {
+        blockedRetry += 1;
+        continue;
+      }
       if (manualLocked) {
         skipped += 1;
         continue;
@@ -1514,7 +1624,8 @@ async function rerunAIForDocuments(req, res) {
       };
       const result = await processDocumentWithAI(docPayload, rawText, effectivePayment, {
         actorType: 'system',
-        actorId: req.user?.userId || null
+        actorId: req.user?.userId || null,
+        sourceAction: 'reprocess'
       });
       if (!result || !result.success) {
         flaggedManual += 1;
@@ -1543,7 +1654,8 @@ async function rerunAIForDocuments(req, res) {
       skipped_manual: skipped,
       dates_updated: datesUpdated,
       dates_still_missing: datesStillMissing,
-      flagged_manual: flaggedManual
+      flagged_manual: flaggedManual,
+      blocked_retry: blockedRetry
     });
   } catch (error) {
     console.error('Rerun AI error:', error);
@@ -1559,5 +1671,7 @@ module.exports = {
   getVerificationSummary,
   deleteDocument,
   rerunAIForDocuments,
-  processDocumentWithAI
+  processDocumentWithAI,
+  canAttemptReprocess,
+  buildVerificationSnapshot
 };

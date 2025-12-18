@@ -2,9 +2,11 @@ const pool = require('../config/database');
 const { preprocessFile } = require('../services/preprocessService');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { normalizeCategory } = require('../utils/categoryMap');
 const { safeParseJSON } = require('../utils/json');
 const { getRawTextFromDoc } = require('../utils/ocrCache');
+const { getDefaultDropId } = require('../utils/metaCache');
 const { logDocumentFieldChange } = require('../utils/documentAudit');
 const { processDocumentWithAI } = require('./uploadController');
 
@@ -89,6 +91,8 @@ async function processBillWithAI(req, res) {
 // Manual processing when AI is unavailable or needs override
 async function processBillManual(req, res) {
   const { document_id } = req.params;
+  const operationId = crypto.randomUUID();
+  const sourceAction = 'manual_entry';
     const {
       vendor_name,
     vendor_gstin,
@@ -293,7 +297,9 @@ async function processBillManual(req, res) {
         actorId,
         reason: 'manual_update',
         confidence: 1,
-        evidence: 'manual entry'
+        evidence: 'manual entry',
+        operationId,
+        sourceAction
       });
     }
     if (total_amount) {
@@ -307,7 +313,9 @@ async function processBillManual(req, res) {
         actorId,
         reason: 'manual_update',
         confidence: 1,
-        evidence: 'manual entry'
+        evidence: 'manual entry',
+        operationId,
+        sourceAction
       });
     }
 
@@ -319,13 +327,14 @@ async function processBillManual(req, res) {
     const manualPaymentStatus = manualScheduleCreated ? 'pending' : 'paid';
     await pool.query('UPDATE bills SET payment_status = $1 WHERE bill_id = $2', [manualPaymentStatus, billId]);
 
+    const defaultDropId = await getDefaultDropId();
     // Save line items
     if (Array.isArray(line_items) && line_items.length > 0) {
       for (let i = 0; i < line_items.length; i++) {
         const item = line_items[i];
         await pool.query(
-          `INSERT INTO bill_items (bill_id, description, sku_code, quantity, unit_price, amount, line_number)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          `INSERT INTO bill_items (bill_id, description, sku_code, quantity, unit_price, amount, line_number, drop_id, is_postable, posting_status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [
             billId,
             item.description || 'Line item',
@@ -333,7 +342,10 @@ async function processBillManual(req, res) {
             item.quantity || 0,
             item.rate || 0,
             item.amount || 0,
-            i + 1
+            i + 1,
+            item.drop_id || defaultDropId,
+            typeof item.is_postable === 'boolean' ? item.is_postable : true,
+            'unposted'
           ]
         );
       }
@@ -364,9 +376,18 @@ async function processBillManual(req, res) {
         confidence: 1
       }
     };
-    const verificationStatus = bill_date ? 'verified' : 'needs_review';
-    const qualityScore = bill_date ? 100 : 90;
-    const verificationReason = bill_date ? null : 'Manual: missing bill date';
+    const manualVerified = Boolean(bill_date && total_amount);
+    const verificationStatus = manualVerified ? 'verified' : 'needs_review';
+    const qualityScore = manualVerified ? 100 : 90;
+    const missingParts = [];
+    if (!bill_date) missingParts.push('missing bill date');
+    if (!total_amount) missingParts.push('missing total');
+    const verificationReason = missingParts.length > 0
+      ? `Manual: ${missingParts.join(', ')}`
+      : null;
+    const verifiedAt = manualVerified ? new Date().toISOString() : null;
+    const verifiedBy = manualVerified ? lockActor : null;
+    const verificationSource = manualVerified ? 'manual' : null;
 
     // Update document status and stash manual data
     await pool.query(
@@ -380,11 +401,14 @@ async function processBillManual(req, res) {
            quality_score = $7,
            extraction_state = $8,
            verification_reason = $9,
-           bill_date_locked = CASE WHEN $10 THEN TRUE ELSE bill_date_locked END,
-           total_locked = CASE WHEN $11 THEN TRUE ELSE total_locked END,
-           locked_by_user_id = $12,
+           verified_at = $10,
+           verified_by_user_id = $11,
+           verification_source = $12,
+           bill_date_locked = CASE WHEN $13 THEN TRUE ELSE bill_date_locked END,
+           total_locked = CASE WHEN $14 THEN TRUE ELSE total_locked END,
+           locked_by_user_id = $15,
            locked_at = NOW()
-       WHERE document_id = $13`,
+       WHERE document_id = $16`,
       [
         'processed',
         JSON.stringify({
@@ -410,6 +434,9 @@ async function processBillManual(req, res) {
         qualityScore,
         JSON.stringify(manualExtractionState),
         verificationReason,
+        verifiedAt,
+        verifiedBy,
+        verificationSource,
         lockBillDate,
         true,
         lockActor,

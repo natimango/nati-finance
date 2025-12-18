@@ -1,4 +1,6 @@
 const pool = require('../config/database');
+const { normalizeCategory } = require('../utils/categoryMap');
+const { getContributionMarginData } = require('../services/skuCostService');
 
 const BILL_DATE_SQL = `COALESCE(b.bill_date, b.created_at::date, d.uploaded_at::date)`;
 const ACTIVE_BILL_FILTER = `
@@ -207,6 +209,17 @@ async function getBalanceSheet(req, res) {
   } catch (error) {
     console.error('Balance Sheet error:', error);
     res.status(500).json({ error: error.message });
+  }
+}
+
+async function getContributionMargin(req, res) {
+  try {
+    const dropId = req.query.dropId ? Number(req.query.dropId) : null;
+    const data = await getContributionMarginData(Number.isFinite(dropId) ? dropId : null);
+    res.json({ success: true, drop_id: dropId, data });
+  } catch (error) {
+    console.error('Contribution margin error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 }
 
@@ -526,24 +539,13 @@ async function getMetricsSummary(req, res) {
       LIMIT 5
     `, [startDate, endDate]);
 
-    const spendByGroup = await pool.query(`
-      SELECT COALESCE(b.category_group, 'OPERATING') as category_group, SUM(b.total_amount) as total
-      FROM bills b
-      LEFT JOIN documents d ON b.document_id = d.document_id
-      WHERE ${BILL_DATE_SQL} BETWEEN $1 AND $2
-        AND ${ACTIVE_BILL_FILTER}
-      GROUP BY b.category_group
-      ORDER BY total DESC NULLS LAST
-    `, [startDate, endDate]);
-
-    const spendByCategory = await pool.query(`
-      SELECT COALESCE(b.category, 'misc') as category, SUM(b.total_amount) as total
+    const spendByCategoryRaw = await pool.query(`
+      SELECT COALESCE(b.category, d.document_category, 'misc') as category, SUM(b.total_amount) as total
       FROM bills b
       LEFT JOIN documents d ON b.document_id = d.document_id
       WHERE ${BILL_DATE_SQL} BETWEEN $1 AND $2
         AND ${ACTIVE_BILL_FILTER}
       GROUP BY b.category
-      ORDER BY total DESC NULLS LAST
     `, [startDate, endDate]);
 
     const spendByPayment = await pool.query(`
@@ -556,13 +558,15 @@ async function getMetricsSummary(req, res) {
       ORDER BY total DESC NULLS LAST
     `, [startDate, endDate]);
 
+    const { spendByCategory, spendByGroup } = aggregateCategorySpend(spendByCategoryRaw.rows);
+
     res.json({
       success: true,
       period: { start_date: startDate, end_date: endDate },
       docs_by_status: docsByStatus.rows,
       spend_by_vendor: spendByVendor.rows,
-      spend_by_group: spendByGroup.rows,
-      spend_by_category: spendByCategory.rows,
+      spend_by_group: spendByGroup,
+      spend_by_category: spendByCategory,
       spend_by_payment_method: spendByPayment.rows
     });
   } catch (error) {
@@ -641,6 +645,29 @@ async function ingestShipmentCost(req, res) {
   }
 }
 
+function aggregateCategorySpend(rows = []) {
+  const categoryTotals = {};
+  const groupTotals = {};
+
+  rows.forEach(row => {
+    const amount = parseFloat(row.total || 0);
+    if (!amount) return;
+    const info = normalizeCategory(row.category);
+    categoryTotals[info.category] = (categoryTotals[info.category] || 0) + amount;
+    groupTotals[info.category_group] = (groupTotals[info.category_group] || 0) + amount;
+  });
+
+  const spendByCategory = Object.entries(categoryTotals)
+    .map(([category, total]) => ({ category, total }))
+    .sort((a, b) => b.total - a.total);
+
+  const spendByGroup = Object.entries(groupTotals)
+    .map(([category_group, total]) => ({ category_group, total }))
+    .sort((a, b) => b.total - a.total);
+
+  return { spendByCategory, spendByGroup };
+}
+
 module.exports = {
   getProfitLoss,
   getTrialBalance,
@@ -654,6 +681,7 @@ module.exports = {
   getDropVariance,
   getMetricsSummary,
   getCogsBySku,
+  getContributionMargin,
   ingestMarketingSpend,
   ingestShipmentCost
 };
