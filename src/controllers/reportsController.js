@@ -545,7 +545,7 @@ async function getMetricsSummary(req, res) {
       LEFT JOIN documents d ON b.document_id = d.document_id
       WHERE ${BILL_DATE_SQL} BETWEEN $1 AND $2
         AND ${ACTIVE_BILL_FILTER}
-      GROUP BY b.category
+      GROUP BY 1
     `, [startDate, endDate]);
 
     const spendByPayment = await pool.query(`
