@@ -550,6 +550,8 @@ function buildVerificationSnapshot(row = {}) {
   const hasRawText = Boolean(row.raw_text);
 
   const storedReason = row.verification_reason || null;
+  const unpostedAmount = Number(row.unposted_amount || 0);
+  const hasUnposted = unpostedAmount > 0;
   let reason = storedReason || resolveVerificationReason({
     hasBillDate,
     hasTotal,
@@ -561,8 +563,6 @@ function buildVerificationSnapshot(row = {}) {
     reason = reason || 'Unposted spend';
   }
 
-  const unpostedAmount = Number(row.unposted_amount || 0);
-  const hasUnposted = unpostedAmount > 0;
   const isProcessing = !hasRawText || !['processed', 'manual_required'].includes(docStatus);
   let status;
   if (isProcessing) {
