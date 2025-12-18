@@ -3,14 +3,40 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const cookieParser = require('cookie-parser');
+const { execSync } = require('child_process');
 const pool = require('./config/database');
 const { authenticate } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const defaultOrigins = ['https://accounts.natiwear.in', 'http://localhost:3000'];
+const corsOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
+  : defaultOrigins;
+
+const startedAt = new Date().toISOString();
+let gitSha = 'unknown';
+try {
+  gitSha = execSync('git rev-parse HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+} catch (err) {
+  console.warn('Unable to resolve git SHA for /api/version');
+}
+
+const versionInfo = {
+  git_sha: gitSha,
+  started_at: startedAt,
+  env: process.env.NODE_ENV || 'development'
+};
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : true,
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (corsOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true
 }));
 app.use(cookieParser());
@@ -60,6 +86,13 @@ app.get('/api/health', async (req, res) => {
       message: error.message
     });
   }
+});
+
+app.get('/api/version', (_req, res) => {
+  res.json({
+    ...versionInfo,
+    status: 'OK'
+  });
 });
 
 app.get('/', (req, res) => {
