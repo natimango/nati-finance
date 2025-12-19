@@ -2,12 +2,13 @@ FROM node:20-bullseye AS base
 
 WORKDIR /app
 
-# Install all dependencies for build, then prune dev deps
+# Install all dependencies for build (dev included for CSS build)
 COPY package*.json ./
-RUN npm install && npm run build:css && npm prune --omit=dev
+RUN npm install
 
-# Copy source
+# Copy source and build CSS, then prune dev deps
 COPY . .
+RUN npm run build:css && npm prune --omit=dev
 
 ENV NODE_ENV=production \
     PORT=3000
