@@ -8,7 +8,8 @@
     "dev": "nodemon src/server.js",
     "test": "echo \"No tests yet\" && exit 0",
     "create:admin": "node scripts/createAdmin.js",
-    "nightly:verify": "node scripts/nightlyVerification.js"
+    "nightly:verify": "node scripts/nightlyVerification.js",
+    "build:css": "postcss src/css/tailwind.css -o public/css/tailwind.css"
   },
   "repository": {
     "type": "git",
@@ -39,6 +40,11 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "nodemon": "^3.1.11"
+    "@tailwindcss/postcss": "^4.1.18",
+    "autoprefixer": "^10.4.23",
+    "nodemon": "^3.1.11",
+    "postcss": "^8.5.6",
+    "postcss-cli": "^11.0.1",
+    "tailwindcss": "^4.1.18"
   }
 }
