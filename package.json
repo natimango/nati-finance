@@ -7,6 +7,7 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "echo \"No tests yet\" && exit 0",
+    "lint": "npm run build:css && echo \"Lint not configured; add ESLint when ready\"",
     "create:admin": "node scripts/createAdmin.js",
     "nightly:verify": "node scripts/nightlyVerification.js",
     "build:css": "postcss src/css/tailwind.css -o public/css/tailwind.css"

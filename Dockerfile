@@ -2,9 +2,9 @@ FROM node:20-bullseye AS base
 
 WORKDIR /app
 
-# Install production dependencies first (leveraging Docker layer caching)
+# Install all dependencies for build, then prune dev deps
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm install && npm run build:css && npm prune --omit=dev
 
 # Copy source
 COPY . .
