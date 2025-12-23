@@ -1689,6 +1689,38 @@ async function submitManual(event) {
     }
 }
 
+// Lightweight action wrappers used by inline buttons in the document modal.
+// Keeping these here ensures the buttons remain functional even if the
+// underlying functions change names in the future.
+function actionPreview(documentId, fileName, fileType) {
+    return viewDocument(documentId, fileName, fileType);
+}
+
+function actionProcessAI(documentId) {
+    return processWithAI(documentId);
+}
+
+function actionRetry(documentId) {
+    return retryAI(documentId);
+}
+
+function actionViewData(documentId) {
+    return viewExtractedData(documentId);
+}
+
+function actionManual(documentId) {
+    return openManualModal(documentId);
+}
+
+function actionDelete(documentId, billId) {
+    if (billId) return deleteBill(billId);
+    return deleteDocument(documentId);
+}
+
+function actionDownload(documentId) {
+    return downloadDocument(documentId);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     if (window.sessionReady) {
         window.sessionReady.then(() => loadDocuments()).catch(() => {});
