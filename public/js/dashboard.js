@@ -13,6 +13,11 @@ function authFetch(url, options = {}) {
     return fetch(url, opts);
 }
 
+function formatINR(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+    return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(value);
+}
+
 // Load dashboard data
 async function loadDashboard() {
     try {
@@ -51,6 +56,7 @@ async function loadDashboard() {
             renderMetrics(metrics);
         }
 
+        await loadUnitEconomics();
         await loadWatchdog(true);
     } catch (error) {
         console.error('Error loading dashboard:', error);
@@ -192,6 +198,34 @@ function renderMetrics(metrics) {
         } else {
             topVendorEl.textContent = 'No data';
         }
+    }
+}
+
+async function loadUnitEconomics() {
+    const blendedEl = document.getElementById('blended-max-cac');
+    const flagsEl = document.getElementById('cm-flags');
+    if (!blendedEl || !flagsEl) return;
+    try {
+        const res = await authFetch(`${API_URL}/reports/unit-economics`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const econ = data?.data || {};
+        const perSku = econ.per_sku || [];
+        const blendedMaxCac = econ.blended_max_cac;
+        blendedEl.textContent = formatINR(blendedMaxCac);
+
+        const negativeCount = perSku.filter(p => p.flags?.negative_cm).length;
+        const missingCount = perSku.filter(p => p.flags?.missing_price || p.flags?.missing_cost || p.flags?.missing_assumptions).length;
+        const total = perSku.length;
+        if (total === 0) {
+            flagsEl.textContent = 'No SKU unit economics yet';
+        } else {
+            flagsEl.textContent = `Negative CM SKUs: ${negativeCount} • Missing data: ${missingCount}`;
+        }
+    } catch (err) {
+        console.error('Unit economics error:', err);
+        blendedEl.textContent = '—';
+        flagsEl.textContent = 'Unit economics unavailable';
     }
 }
 
