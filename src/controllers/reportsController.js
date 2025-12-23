@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const { normalizeCategory } = require('../utils/categoryMap');
 const { getContributionMarginData } = require('../services/skuCostService');
+const { getUnitEconomicsData } = require('../services/unitEconomicsService');
 
 const BILL_DATE_SQL = `COALESCE(b.bill_date, b.created_at::date, d.uploaded_at::date)`;
 const ACTIVE_BILL_FILTER = `
@@ -219,6 +220,17 @@ async function getContributionMargin(req, res) {
     res.json({ success: true, drop_id: dropId, data });
   } catch (error) {
     console.error('Contribution margin error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+async function getUnitEconomics(req, res) {
+  try {
+    const dropId = req.query.dropId ? Number(req.query.dropId) : null;
+    const data = await getUnitEconomicsData(Number.isFinite(dropId) ? dropId : null);
+    res.json({ success: true, drop_id: dropId, data });
+  } catch (error) {
+    console.error('Unit economics error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 }
@@ -682,6 +694,7 @@ module.exports = {
   getMetricsSummary,
   getCogsBySku,
   getContributionMargin,
+  getUnitEconomics,
   ingestMarketingSpend,
   ingestShipmentCost
 };

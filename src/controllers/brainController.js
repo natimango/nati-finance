@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const { getContributionMarginData } = require('../services/skuCostService');
+const { getMaxCacByTier, getMaxCacBySize } = require('../services/unitEconomicsService');
 
 const ALERT_TYPES = {
   agedNeedsReview: 'DOC_NEEDS_REVIEW_AGED',
@@ -1079,6 +1080,28 @@ async function getDropCostOverview(req, res) {
   }
 }
 
+async function getMaxCacTiers(req, res) {
+  try {
+    const dropId = req.query.dropId ? Number(req.query.dropId) : null;
+    const data = await getMaxCacByTier(Number.isFinite(dropId) ? dropId : null);
+    res.json({ success: true, drop_id: dropId, data });
+  } catch (err) {
+    console.error('Max CAC tiers error', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+async function getMaxCacSizes(req, res) {
+  try {
+    const skuId = req.query.sku_id ? Number(req.query.sku_id) : null;
+    const data = await getMaxCacBySize(skuId);
+    res.json({ success: true, sku_id: skuId, data });
+  } catch (err) {
+    console.error('Max CAC sizes error', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getFinanceSummary,
   getDropOverview,
@@ -1089,5 +1112,7 @@ module.exports = {
   getAlertSummary,
   getGuardrails,
   checkInvariants,
-  getDropCostOverview
+  getDropCostOverview,
+  getMaxCacTiers,
+  getMaxCacSizes
 };

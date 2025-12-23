@@ -1443,7 +1443,22 @@ const getDocument = async (req, res) => {
     let lineItems = [];
     if (document.bill_id) {
       const itemsResult = await pool.query(
-        `SELECT description, sku_code, quantity, unit_price, amount, line_number
+        `SELECT 
+            item_id,
+            description,
+            sku_code,
+            quantity,
+            unit_price,
+            amount,
+            line_number,
+            coa_account_id,
+            department_id,
+            drop_id,
+            is_postable,
+            posting_status,
+            go_live_eligible,
+            cost_nature,
+            cost_stage
          FROM bill_items
          WHERE bill_id = $1
          ORDER BY line_number ASC`,

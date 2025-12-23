@@ -20,6 +20,11 @@ let calendarCursor = new Date();
 let filtersCollapsed = false;
 let calendarCollapsed = false;
 let useBillDateMode = true; // true = bill_date, false = uploaded_at
+let showUnpostedOnly = true;
+let metaCache = { coa: null, departments: null, drops: null };
+let currentDocumentDetail = null;
+let currentBillItems = [];
+const bus = window.store || { subscribe: () => {}, emit: () => {}, EVENTS: { DATA_CHANGED: 'DATA_CHANGED' } };
 
 function authFetch(url, options = {}) {
     const opts = Object.assign({ credentials: 'include' }, options);
@@ -241,6 +246,25 @@ function getVerificationFilterLabel(key) {
     return option ? option.label : key;
 }
 
+async function ensureMetaLoaded() {
+    if (metaCache.coa && metaCache.departments && metaCache.drops) return metaCache;
+    try {
+        const [coaRes, deptRes, dropRes] = await Promise.all([
+            window.apiFetch ? window.apiFetch('/api/meta/coa_accounts', { method: 'GET' }) : authFetch('/api/meta/coa_accounts').then(r => r.json()),
+            window.apiFetch ? window.apiFetch('/api/meta/departments', { method: 'GET' }) : authFetch('/api/meta/departments').then(r => r.json()),
+            window.apiFetch ? window.apiFetch('/api/meta/drops', { method: 'GET' }) : authFetch('/api/meta/drops').then(r => r.json())
+        ]);
+        metaCache = {
+            coa: coaRes.accounts || [],
+            departments: deptRes.departments || [],
+            drops: dropRes.drops || []
+        };
+    } catch (err) {
+        console.error('Failed to load meta options', err);
+    }
+    return metaCache;
+}
+
 function displayDocuments(documents) {
     renderTable(documents);
 }
@@ -334,7 +358,7 @@ function selectDocument(id) {
 }
 
 
-function openBillModal(id) {
+async function openBillModal(id) {
     const doc = filteredDocuments.find(d => d.document_id === id);
     if (!doc) return;
     selectedDocId = id;
@@ -342,90 +366,419 @@ function openBillModal(id) {
     const body = document.getElementById('bill-modal-body');
     const titleEl = document.getElementById('bill-modal-title');
     const subEl = document.getElementById('bill-modal-sub');
-    const providerInfo = getProviderInfo(doc.gemini_data);
-    const total = doc.total_amount || doc.gemini_data?.amounts?.total || 0;
-    const billNo = doc.bill_number || doc.gemini_data?.bill_number || '—';
-    const billDate = getDocDate(doc);
-    const vendor = doc.vendor_name || doc.gemini_data?.vendor_name || '—';
-    const status = getStatusBadge(doc.status);
-    const canProcess = doc.can_process !== false;
-    const canManual = doc.can_manual !== false;
-    const canDeleteDoc = doc.can_delete !== false;
-    const categoryValue = formatLabel(getCategory(doc));
-    const categoryGroup = getCategoryGroup(doc);
-    const categoryLabel = categoryGroup
-        ? `${formatLabel(categoryGroup)} • ${categoryValue}`
-        : categoryValue;
-    const previewButton = canPreviewFile(doc.file_type)
-        ? `<button onclick="actionPreview(${doc.document_id}, '${doc.file_name?.replace('"','') || ''}', '${doc.file_type}')" class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm"><i class='fas fa-eye mr-1'></i>Preview</button>`
-        : '';
-    const processButton = doc.status !== 'processed'
-        ? (canProcess
-            ? `<button onclick="actionProcessAI(${doc.document_id})" class="px-3 py-2 bg-purple-600 text-white rounded-lg text-sm"><i class='fas fa-robot mr-1'></i>Process AI</button>`
-            : `<span class="px-3 py-2 bg-slate-100 text-slate-500 rounded-lg text-xs inline-flex items-center gap-1"><i class="fas fa-lock"></i>Manager required</span>`)
-        : `<button onclick="actionViewData(${doc.document_id})" class="px-3 py-2 bg-purple-600 text-white rounded-lg text-sm"><i class='fas fa-eye mr-1'></i>View Data</button>`;
-    const manualButton = canManual
-        ? `<button onclick="actionManual(${doc.document_id})" class="px-3 py-2 bg-orange-500 text-white rounded-lg text-sm"><i class='fas fa-hand-paper mr-1'></i>Manual</button>`
-        : '';
-    const deleteButton = canDeleteDoc
-        ? `<button onclick="actionDelete(${doc.document_id}, ${doc.bill_id || 'null'})" class="px-3 py-2 bg-red-600 text-white rounded-lg text-sm"><i class='fas fa-trash mr-1'></i>Delete</button>`
-        : '';
-
-    titleEl.textContent = vendor;
-    subEl.textContent = `Bill: ${billNo} • ${formatDateDisplay(billDate)}`;
-
-    const verificationInfo = doc.verification || null;
-    const qualityScoreLabel = docQualityScore(doc);
-    const verificationPanel = verificationInfo ? `
-            <div class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm text-slate-700">
-                <div class="flex items-center justify-between gap-2">
-                    ${verificationBadge(doc)}
-                    ${qualityScoreLabel != null ? `<span class="text-xs text-slate-500">Quality ${qualityScoreLabel}/100</span>` : ''}
-                </div>
-                ${verificationInfo.reason ? `<p class="text-xs text-amber-600 mt-2">${escapeHTML(verificationInfo.reason)}</p>` : ''}
-                ${verificationInfo.bill_date_evidence ? `<p class="text-[11px] text-slate-500 mt-2">Date evidence: ${escapeHTML(verificationInfo.bill_date_evidence)}</p>` : ''}
-                ${verificationInfo.total_evidence ? `<p class="text-[11px] text-slate-500">Total evidence: ${escapeHTML(verificationInfo.total_evidence)}</p>` : ''}
-                ${(verificationInfo.bill_date_locked || verificationInfo.total_locked) ? `<p class="text-[11px] text-slate-500 mt-2"><i class="fas fa-lock mr-1"></i>Locked fields won’t be overwritten</p>` : ''}
-                ${verificationInfo.status === 'needs_review' ? `
-                    <div class="flex flex-wrap gap-2 mt-3">
-                        <button onclick="actionRetry(${doc.document_id})" class="px-3 py-2 bg-purple-600 text-white rounded-lg text-xs flex items-center gap-1"><i class="fas fa-robot"></i><span>Re-run AI</span></button>
-                        <button onclick="actionManual(${doc.document_id})" class="px-3 py-2 bg-orange-500 text-white rounded-lg text-xs flex items-center gap-1"><i class="fas fa-pen"></i><span>Fix now</span></button>
-                    </div>
-                ` : ''}
-            </div>
-        ` : '';
-
-    body.innerHTML = `
-        <div class="space-y-3">
-            <div class="flex items-start justify-between gap-3">
-                <div>
-                    <p class="text-sm text-gray-500">${status}${providerInfo ? ` <span class='text-xs text-gray-500 ml-1'>${providerInfo}</span>` : ''}</p>
-                    <p class="text-xs text-gray-500">${doc.file_name || ''}</p>
-                </div>
-                <div class="text-sm text-gray-700 flex items-center gap-2">
-                    <span class="inline-flex items-center px-2 py-1 bg-gray-100 rounded text-xs text-gray-700"><i class="fas fa-money-bill-wave mr-1 text-green-600"></i>₹${Number(total||0).toLocaleString()}</span>
-                    ${categoryLabel && categoryLabel !== '—' ? `<span class="inline-flex items-center px-2 py-1 bg-indigo-50 text-indigo-700 rounded text-xs"><i class="fas fa-tag mr-1"></i>${categoryLabel}</span>` : ''}
-                </div>
-            </div>
-            ${verificationPanel}
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-700">
-                <div><span class="text-gray-500">Bill No:</span> ${billNo}</div>
-                <div><span class="text-gray-500">Date:</span> ${formatDateDisplay(billDate)}</div>
-                <div><span class="text-gray-500">Doc Type:</span> ${doc.file_type || '—'}</div>
-                <div><span class="text-gray-500">File:</span> ${doc.file_name || '—'}</div>
-            </div>
-            <div class="flex flex-wrap gap-2 pt-2">
-                ${previewButton}
-                ${processButton}
-                ${manualButton}
-                ${deleteButton}
-                <button onclick="actionDownload(${doc.document_id})" class="px-3 py-2 bg-green-600 text-white rounded-lg text-sm"><i class='fas fa-download mr-1'></i>Download</button>
-            </div>
-        </div>
-    `;
     modal.classList.remove('hidden');
     modal.classList.add('flex');
+    titleEl.textContent = 'Loading…';
+    subEl.textContent = '';
+    body.innerHTML = `<div class="p-6 text-sm text-slate-600">Loading document…</div>`;
+
+    try {
+        const detailResp = window.apiFetch
+            ? await window.apiFetch(`${API_URL}/documents/${id}`, { method: 'GET' })
+            : await authFetch(`${API_URL}/documents/${id}`).then(r => r.json());
+        if (!detailResp || detailResp.success === false) {
+            body.innerHTML = `<p class="text-red-600 text-sm">Failed to load document.</p>`;
+            return;
+        }
+        currentDocumentDetail = detailResp.document || doc;
+        currentBillItems = Array.isArray(currentDocumentDetail.line_items) ? currentDocumentDetail.line_items : [];
+        await ensureMetaLoaded();
+
+        const fullDoc = { ...doc, ...currentDocumentDetail };
+        const providerInfo = getProviderInfo(fullDoc.gemini_data);
+        const total = fullDoc.total_amount || fullDoc.gemini_data?.amounts?.total || 0;
+        const billNo = fullDoc.bill_number || fullDoc.gemini_data?.bill_number || '—';
+        const billDate = getDocDate(fullDoc);
+        const vendor = fullDoc.vendor_name || fullDoc.gemini_data?.vendor_name || '—';
+        const status = getStatusBadge(fullDoc.status);
+        const canProcess = fullDoc.can_process !== false;
+        const canManual = fullDoc.can_manual !== false;
+        const canDeleteDoc = fullDoc.can_delete !== false;
+        const categoryValue = formatLabel(getCategory(fullDoc));
+        const categoryGroup = getCategoryGroup(fullDoc);
+        const categoryLabel = categoryGroup
+            ? `${formatLabel(categoryGroup)} • ${categoryValue}`
+            : categoryValue;
+        const previewButton = canPreviewFile(fullDoc.file_type)
+            ? `<button onclick="actionPreview(${fullDoc.document_id}, '${fullDoc.file_name?.replace('"','') || ''}', '${fullDoc.file_type}')" class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm"><i class='fas fa-eye mr-1'></i>Preview</button>`
+            : '';
+        const processButton = fullDoc.status !== 'processed'
+            ? (canProcess
+                ? `<button onclick="actionProcessAI(${fullDoc.document_id})" class="px-3 py-2 bg-purple-600 text-white rounded-lg text-sm"><i class='fas a-robot mr-1'></i>Process AI</button>`
+                : `<span class="px-3 py-2 bg-slate-100 text-slate-500 rounded-lg text-xs inline-flex items-center gap-1"><i class="fas fa-lock"></i>Manager required</span>`)
+            : `<button onclick="actionViewData(${fullDoc.document_id})" class="px-3 py-2 bg-purple-600 text-white rounded-lg text-sm"><i class='fas fa-eye mr-1'></i>View Data</button>`;
+        const manualButton = canManual
+            ? `<button onclick="actionManual(${fullDoc.document_id})" class="px-3 py-2 bg-orange-500 text-white rounded-lg text-sm"><i class='fas fa-hand-paper mr-1'></i>Manual</button>`
+            : '';
+        const deleteButton = canDeleteDoc
+            ? `<button onclick="actionDelete(${fullDoc.document_id}, ${fullDoc.bill_id || 'null'})" class="px-3 py-2 bg-red-600 text-white rounded-lg text-sm"><i class='fas fa-trash mr-1'></i>Delete</button>`
+            : '';
+
+        titleEl.textContent = vendor;
+        subEl.textContent = `Bill: ${billNo} • ${formatDateDisplay(billDate)}`;
+
+        const verificationInfo = fullDoc.verification || null;
+        const qualityScoreLabel = docQualityScore(fullDoc);
+        const verificationPanel = verificationInfo ? `
+                <div class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm text-slate-700">
+                    <div class="flex items-center justify-between gap-2">
+                        ${verificationBadge(fullDoc)}
+                        ${qualityScoreLabel != null ? `<span class="text-xs text-slate-500">Quality ${qualityScoreLabel}/100</span>` : ''}
+                    </div>
+                    ${verificationInfo.reason ? `<p class="text-xs text-amber-600 mt-2">${escapeHTML(verificationInfo.reason)}</p>` : ''}
+                    ${verificationInfo.bill_date_evidence ? `<p class="text-[11px] text-slate-500 mt-2">Date evidence: ${escapeHTML(verificationInfo.bill_date_evidence)}</p>` : ''}
+                    ${verificationInfo.total_evidence ? `<p class="text-[11px] text-slate-500">Total evidence: ${escapeHTML(verificationInfo.total_evidence)}</p>` : ''}
+                    ${(verificationInfo.bill_date_locked || verificationInfo.total_locked) ? `<p class="text-[11px] text-slate-500 mt-2"><i class="fas fa-lock mr-1"></i>Locked fields won’t be overwritten</p>` : ''}
+                    ${verificationInfo.status === 'needs_review' ? `
+                        <div class="flex flex-wrap gap-2 mt-3">
+                            <button onclick="actionRetry(${fullDoc.document_id})" class="px-3 py-2 bg-purple-600 text-white rounded-lg text-xs flex items-center gap-1"><i class="fas fa-robot"></i><span>Re-run AI</span></button>
+                            <button onclick="actionManual(${fullDoc.document_id})" class="px-3 py-2 bg-orange-500 text-white rounded-lg text-xs flex items-center gap-1"><i class="fas fa-pen"></i><span>Fix now</span></button>
+                        </div>
+                    ` : ''}
+                </div>
+            ` : '';
+
+        const leftPane = `
+            <div class="space-y-3">
+                <div class="flex items-start justify-between gap-3">
+                    <div>
+                        <p class="text-sm text-gray-500">${status}${providerInfo ? ` <span class='text-xs text-gray-500 ml-1'>${providerInfo}</span>` : ''}</p>
+                        <p class="text-xs text-gray-500">${fullDoc.file_name || ''}</p>
+                    </div>
+                    <div class="text-sm text-gray-700 flex items-center gap-2">
+                        <span class="inline-flex items-center px-2 py-1 bg-gray-100 rounded text-xs text-gray-700"><i class="fas fa-money-bill-wave mr-1 text-green-600"></i>₹${Number(total||0).toLocaleString()}</span>
+                        ${categoryLabel && categoryLabel !== '—' ? `<span class="inline-flex items-center px-2 py-1 bg-indigo-50 text-indigo-700 rounded text-xs"><i class="fas fa-tag mr-1"></i>${categoryLabel}</span>` : ''}
+                    </div>
+                </div>
+                ${verificationPanel}
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-700">
+                    <div><span class="text-gray-500">Bill No:</span> ${billNo}</div>
+                    <div><span class="text-gray-500">Date:</span> ${formatDateDisplay(billDate)}</div>
+                    <div><span class="text-gray-500">Doc Type:</span> ${fullDoc.file_type || '—'}</div>
+                    <div><span class="text-gray-500">File:</span> ${fullDoc.file_name || '—'}</div>
+                </div>
+                <div class="flex flex-wrap gap-2 pt-2">
+                    ${previewButton}
+                    ${processButton}
+                    ${manualButton}
+                    ${deleteButton}
+                    <button onclick="actionDownload(${fullDoc.document_id})" class="px-3 py-2 bg-green-600 text-white rounded-lg text-sm"><i class='fas fa-download mr-1'></i>Download</button>
+                </div>
+            </div>
+        `;
+
+        body.innerHTML = `
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div class="space-y-3">${leftPane}</div>
+                <div id="posting-panel" class="bg-slate-50 border border-slate-200 rounded-lg p-3"></div>
+            </div>
+        `;
+        renderPostingPanel();
+    } catch (err) {
+        console.error('Load detail failed', err);
+        body.innerHTML = `<p class="text-sm text-red-600">Failed to load document.</p>`;
+    }
 }
+
+function getCoaLabel(id) {
+    if (!metaCache.coa) return '—';
+    const match = metaCache.coa.find((c) => String(c.id) === String(id));
+    if (!match) return '—';
+    const parts = [match.code, match.name].filter(Boolean);
+    return parts.join(' • ') || '—';
+}
+
+function getDeptLabel(id) {
+    if (!metaCache.departments) return '—';
+    const match = metaCache.departments.find((c) => String(c.id) === String(id));
+    return match?.name || '—';
+}
+
+function getDropLabel(id) {
+    if (!metaCache.drops) return '—';
+    const match = metaCache.drops.find((c) => String(c.id) === String(id));
+    return match?.name || '—';
+}
+
+function isUnposted(item) {
+    return item && item.is_postable !== false && item.posting_status !== 'posted';
+}
+
+async function refreshDocumentDetail(documentId) {
+    try {
+        const detailResp = window.apiFetch
+            ? await window.apiFetch(`${API_URL}/documents/${documentId}`, { method: 'GET' })
+            : await authFetch(`${API_URL}/documents/${documentId}`).then(r => r.json());
+        if (detailResp && detailResp.document) {
+            currentDocumentDetail = detailResp.document;
+            currentBillItems = Array.isArray(currentDocumentDetail.line_items) ? currentDocumentDetail.line_items : [];
+        }
+    } catch (err) {
+        console.error('Failed to refresh document detail', err);
+    }
+}
+
+function buildOptions(arr, placeholder, valueKey = 'id', labelFn = (item) => item.name || item.code || item.id) {
+    const opts = [`<option value="">${placeholder}</option>`];
+    (arr || []).forEach((item) => {
+        const val = item[valueKey];
+        const label = labelFn(item);
+        opts.push(`<option value="${val}">${escapeHTML(label)}</option>`);
+    });
+    return opts.join('');
+}
+
+function getSelectedBillItemIds() {
+    const panel = document.getElementById('posting-panel');
+    if (!panel) return [];
+    const checkboxes = panel.querySelectorAll('.posting-row-select:checked');
+    return Array.from(checkboxes).map((cb) => Number(cb.dataset.id));
+}
+
+function setSelectAllState() {
+    const panel = document.getElementById('posting-panel');
+    if (!panel) return;
+    const selectAll = panel.querySelector('#posting-select-all');
+    if (!selectAll) return;
+    const rows = panel.querySelectorAll('.posting-row-select');
+    if (!rows.length) {
+        selectAll.checked = false;
+        return;
+    }
+    const allChecked = Array.from(rows).every((cb) => cb.checked);
+    selectAll.checked = allChecked;
+}
+
+async function applyPostingChanges(markPosted = false) {
+    const panel = document.getElementById('posting-panel');
+    if (!panel) return;
+    const errorEl = panel.querySelector('#posting-error');
+    const progressEl = panel.querySelector('#posting-progress');
+    if (errorEl) errorEl.textContent = '';
+    if (progressEl) progressEl.textContent = '';
+
+    const ids = getSelectedBillItemIds();
+    if (!ids.length) {
+        if (errorEl) errorEl.textContent = 'Select at least one line item.';
+        return;
+    }
+
+    const payload = {};
+    const coaVal = panel.querySelector('#bulk-coa')?.value || '';
+    const deptVal = panel.querySelector('#bulk-dept')?.value || '';
+    const dropVal = panel.querySelector('#bulk-drop')?.value || '';
+    const goLiveEl = panel.querySelector('#bulk-go-live');
+    const goLiveChecked = goLiveEl?.checked;
+    const costNature = panel.querySelector('#bulk-cost-nature')?.value || '';
+    const costStage = panel.querySelector('#bulk-cost-stage')?.value || '';
+
+    if (coaVal) payload.coa_account_id = Number(coaVal);
+    if (deptVal) payload.department_id = Number(deptVal);
+    if (dropVal) payload.drop_id = Number(dropVal);
+    if (costNature) payload.cost_nature = costNature;
+    if (costStage) payload.cost_stage = costStage;
+    if (goLiveEl && goLiveEl.dataset.touched === 'true') payload.go_live_eligible = Boolean(goLiveChecked);
+
+    if (!markPosted && Object.keys(payload).length === 0) {
+        if (errorEl) errorEl.textContent = 'Select a COA, department, drop, or go-live tag to apply.';
+        return;
+    }
+
+    try {
+        let processed = 0;
+        for (const id of ids) {
+            const item = currentBillItems.find((it) => Number(it.item_id) === Number(id));
+            if (!item) continue;
+
+            const body = { ...payload };
+            if (markPosted) {
+                const effectiveCoa = body.coa_account_id ?? item.coa_account_id;
+                const effectiveDept = body.department_id ?? item.department_id;
+                const effectiveDrop = body.drop_id ?? item.drop_id;
+                if (!effectiveCoa || !effectiveDept || !effectiveDrop) {
+                    throw new Error('COA, Department, and Drop are required to mark as posted.');
+                }
+                body.coa_account_id = effectiveCoa;
+                body.department_id = effectiveDept;
+                body.drop_id = effectiveDrop;
+                body.posting_status = 'posted';
+            }
+
+            if (progressEl) progressEl.textContent = `${markPosted ? 'Posting' : 'Applying'} ${processed + 1}/${ids.length}…`;
+            await window.apiFetch(`${API_URL}/bill-items/${id}`, {
+                method: 'PATCH',
+                body: JSON.stringify(body)
+            });
+            processed += 1;
+        }
+
+        await refreshDocumentDetail(currentDocumentDetail.document_id);
+        renderPostingPanel();
+        loadDocuments();
+        if (bus && bus.emit) {
+            bus.emit(bus.EVENTS.DATA_CHANGED, { source: 'bill-items', document_id: currentDocumentDetail.document_id });
+        }
+        if (progressEl) progressEl.textContent = 'Done.';
+    } catch (err) {
+        console.error('Posting change failed', err);
+        if (errorEl) errorEl.textContent = err.message || 'Failed to update items.';
+    }
+}
+
+function renderPostingPanel() {
+    const panel = document.getElementById('posting-panel');
+    if (!panel) return;
+    const unpostedItems = currentBillItems.filter(isUnposted);
+    const filteredItems = showUnpostedOnly ? unpostedItems : currentBillItems;
+    const unpostedAmount = unpostedItems.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const allSelectedDefault = showUnpostedOnly;
+
+    const selectRow = (itemsHtml) => `
+        <div class="flex items-center justify-between mb-3">
+            <div>
+                <p class="text-sm font-semibold text-slate-800">Posting Panel</p>
+                <p class="text-xs text-slate-600">Unposted ₹${unpostedAmount.toLocaleString()} • ${unpostedItems.length} items</p>
+            </div>
+            <button id="toggle-unposted" class="text-xs px-3 py-1 rounded-full border ${showUnpostedOnly ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-slate-50 border-slate-200 text-slate-700'}">
+                ${showUnpostedOnly ? 'Show all items' : 'Show unposted only'}
+            </button>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
+            <div>
+                <label class="block text-xs font-semibold text-slate-700 mb-1">COA Account</label>
+                <select id="bulk-coa" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                    ${buildOptions(metaCache.coa || [], 'Select COA', 'id', (c) => `${c.code || ''} ${c.name || ''}`.trim())}
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-700 mb-1">Department</label>
+                <select id="bulk-dept" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                    ${buildOptions(metaCache.departments || [], 'Select department')}
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-700 mb-1">Drop</label>
+                <select id="bulk-drop" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                    ${buildOptions(metaCache.drops || [], 'Select drop')}
+                </select>
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+            <div class="flex items-center gap-2">
+                <input type="checkbox" id="bulk-go-live" class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
+                <label for="bulk-go-live" class="text-sm text-slate-700">Go-Live eligible</label>
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-700 mb-1">Cost nature</label>
+                <select id="bulk-cost-nature" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                    <option value="">—</option>
+                    <option value="setup">Setup</option>
+                    <option value="recurring">Recurring</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-700 mb-1">Cost stage</label>
+                <select id="bulk-cost-stage" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                    <option value="">—</option>
+                    <option value="product_build">Product build</option>
+                    <option value="content">Content</option>
+                    <option value="systems">Systems/Tools</option>
+                    <option value="legal">Legal/Compliance</option>
+                    <option value="ops_setup">Ops setup</option>
+                    <option value="prelaunch_marketing">Pre-launch marketing</option>
+                    <option value="other">Other</option>
+                </select>
+            </div>
+        </div>
+        <div class="flex flex-wrap gap-2 mb-3">
+            <button id="apply-dims-btn" class="px-3 py-2 bg-slate-800 text-white rounded-lg text-sm"><i class="fas fa-check mr-1"></i>Apply to selected</button>
+            <button id="mark-posted-btn" class="px-3 py-2 bg-green-600 text-white rounded-lg text-sm"><i class="fas fa-clipboard-check mr-1"></i>Mark selected posted</button>
+        </div>
+        <div class="border border-slate-200 rounded-lg overflow-hidden">
+            <table class="min-w-full text-sm">
+                <thead class="bg-slate-100 text-slate-700">
+                    <tr>
+                        <th class="px-3 py-2 w-10 text-center"><input type="checkbox" id="posting-select-all" class="w-4 h-4 text-indigo-600 border-slate-300 rounded"></th>
+                        <th class="px-3 py-2 text-left">Description</th>
+                        <th class="px-3 py-2 text-right">Amount</th>
+                        <th class="px-3 py-2 text-left">Dims</th>
+                        <th class="px-3 py-2 text-left">Go-Live</th>
+                        <th class="px-3 py-2 text-left">Status</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                    ${itemsHtml}
+                </tbody>
+            </table>
+        </div>
+        <p id="posting-error" class="text-xs text-red-600 mt-2"></p>
+        <p id="posting-progress" class="text-xs text-slate-600 mt-1"></p>
+    `;
+
+    const itemsRows = filteredItems.map((item) => {
+        const dimsLabel = [
+            getCoaLabel(item.coa_account_id),
+            getDeptLabel(item.department_id),
+            getDropLabel(item.drop_id)
+        ].join(' • ');
+        const goLiveLabel = item.go_live_eligible ? `<span class="inline-flex items-center px-2 py-1 bg-amber-50 text-amber-700 rounded text-[11px]">Go-live</span>` : '—';
+        const statusBadge = item.posting_status === 'posted'
+            ? `<span class="inline-flex items-center px-2 py-1 bg-green-100 text-green-800 rounded text-[11px]">Posted</span>`
+            : `<span class="inline-flex items-center px-2 py-1 bg-amber-100 text-amber-800 rounded text-[11px]">Unposted</span>`;
+        const isChecked = allSelectedDefault && isUnposted(item);
+        return `
+            <tr class="hover:bg-slate-50">
+                <td class="px-3 py-2 text-center">
+                    <input type="checkbox" class="posting-row-select w-4 h-4 text-indigo-600 border-slate-300 rounded" data-id="${item.item_id}" ${isChecked ? 'checked' : ''}>
+                </td>
+                <td class="px-3 py-2">
+                    <div class="font-medium text-slate-800">${escapeHTML(item.description || 'Line item')}</div>
+                    <div class="text-xs text-slate-500">SKU: ${escapeHTML(item.sku_code || '—')}</div>
+                </td>
+                <td class="px-3 py-2 text-right font-semibold text-slate-800">₹${Number(item.amount || 0).toLocaleString()}</td>
+                <td class="px-3 py-2 text-slate-700 text-xs">${dimsLabel}</td>
+                <td class="px-3 py-2 text-xs text-slate-700">${goLiveLabel}</td>
+                <td class="px-3 py-2 text-xs text-slate-700">${statusBadge}</td>
+            </tr>
+        `;
+    }).join('') || `<tr><td colspan="6" class="px-3 py-4 text-center text-slate-500 text-sm">No line items found.</td></tr>`;
+
+    panel.innerHTML = selectRow(itemsRows);
+
+    const toggleBtn = panel.querySelector('#toggle-unposted');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', () => {
+            showUnpostedOnly = !showUnpostedOnly;
+            renderPostingPanel();
+        });
+    }
+
+    const selectAll = panel.querySelector('#posting-select-all');
+    if (selectAll) {
+        selectAll.addEventListener('change', (e) => {
+            const rows = panel.querySelectorAll('.posting-row-select');
+            rows.forEach((cb) => { cb.checked = e.target.checked; });
+        });
+    }
+    panel.querySelectorAll('.posting-row-select').forEach((cb) => {
+        cb.addEventListener('change', setSelectAllState);
+    });
+
+    const goLiveEl = panel.querySelector('#bulk-go-live');
+    if (goLiveEl) {
+        goLiveEl.addEventListener('change', () => {
+            goLiveEl.dataset.touched = 'true';
+        });
+    }
+
+    const applyBtn = panel.querySelector('#apply-dims-btn');
+    if (applyBtn) applyBtn.addEventListener('click', () => applyPostingChanges(false));
+    const postBtn = panel.querySelector('#mark-posted-btn');
+    if (postBtn) postBtn.addEventListener('click', () => applyPostingChanges(true));
+
+    setSelectAllState();
+}
+
 function closeBillModal() {
     const modal = document.getElementById('bill-modal');
     if (modal) {
@@ -1342,6 +1695,9 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
         loadDocuments();
     }
+    if (bus && bus.subscribe) {
+        bus.subscribe(bus.EVENTS.DATA_CHANGED, () => loadDocuments());
+    }
     const payTypeEl = document.getElementById('manual-pay-type');
     if (payTypeEl) {
         payTypeEl.addEventListener('change', syncManualPaymentFields);
@@ -1354,23 +1710,3 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 });
-
-
-function closeBillModal() {
-    const modal = document.getElementById('bill-modal');
-    if (modal) modal.classList.add('hidden');
-}
-function actionPreview(docId, fileName, fileType) { closeBillModal(); viewDocument(docId, fileName, fileType); }
-function actionProcessAI(docId) { closeBillModal(); processWithAI(docId); }
-function actionViewData(docId) { closeBillModal(); viewExtractedData(docId); }
-function actionManual(docId) { closeBillModal(); openManualModal(docId); }
-function actionRetry(docId) { closeBillModal(); retryAI(docId); }
-function actionDelete(documentId, billId) {
-    closeBillModal();
-    if (billId) {
-        deleteBill(billId);
-    } else {
-        deleteDocument(documentId);
-    }
-}
-function actionDownload(docId) { closeBillModal(); downloadDocument(docId); }

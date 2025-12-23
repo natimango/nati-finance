@@ -15,5 +15,7 @@ router.post('/alerts/run', authorize('admin'), brainController.runBudgetAlerts);
 router.get('/alerts/summary', authorize('manager', 'admin'), brainController.getAlertSummary);
 router.get('/guardrails/drop/:dropId', authorize('manager', 'admin'), brainController.getGuardrails);
 router.get('/invariants/check', authorize('manager', 'admin'), brainController.checkInvariants);
+router.get('/max-cac/tiers', authorize('manager', 'admin'), brainController.getMaxCacTiers);
+router.get('/max-cac/sizes', authorize('manager', 'admin'), brainController.getMaxCacSizes);
 
 module.exports = router;

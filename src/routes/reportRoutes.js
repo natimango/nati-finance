@@ -14,6 +14,7 @@ const {
   getMetricsSummary,
   getCogsBySku,
   getContributionMargin,
+  getUnitEconomics,
   ingestMarketingSpend,
   ingestShipmentCost
 } = require('../controllers/reportsController');
@@ -32,6 +33,7 @@ router.get('/reports/drop-budgets', getDropBudgets);
 router.get('/reports/drop-budgets/history', getDropBudgetHistory);
 router.get('/reports/drop-variance', getDropVariance);
 router.get('/reports/contribution-margin', getContributionMargin);
+router.get('/reports/unit-economics', getUnitEconomics);
 router.get('/metrics/summary', getMetricsSummary);
 router.get('/metrics/cogs/:sku_code', getCogsBySku);
 router.post('/ingest/marketing', authorize('admin'), ingestMarketingSpend);
