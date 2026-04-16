@@ -7,6 +7,19 @@ const ALERT_LABELS = {
     DOC_HIGH_VALUE_NEEDS_REVIEW: 'High-value needs review',
     DOC_DUPLICATE_FILE: 'Duplicate file'
 };
+const WATCHDOG_LINKS = {
+    duplicates: 'documents.html',
+    stale_manual: 'documents.html?status=manual_required',
+    aged_unpaid: 'documents.html',
+    oversized: 'reports.html'
+};
+function getAlertLink(alert) {
+    if (alert.alert_type === 'BUDGET_VARIANCE') return 'drop.html';
+    if (alert.alert_type === 'DOC_NEEDS_REVIEW_AGED') return 'documents.html?verification=needs_review';
+    if (alert.alert_type === 'DOC_LOW_QUALITY') return 'documents.html?verification=low_quality';
+    if (alert.alert_type === 'DOC_HIGH_VALUE_NEEDS_REVIEW') return 'documents.html?verification=needs_review';
+    return 'documents.html';
+}
 
 function authFetch(url, options = {}) {
     const opts = Object.assign({ credentials: 'include' }, options);
@@ -271,8 +284,9 @@ function renderWatchdog(data, alerts) {
         const list = row.items.length
             ? row.items.map(item => `<div class="text-xs text-slate-500">${item}</div>`).join('')
             : `<div class="text-xs text-slate-400">All clear</div>`;
+        const link = WATCHDOG_LINKS[row.key] || 'documents.html';
         return `
-            <div class="rounded-xl border border-slate-100 bg-white/70 p-3">
+            <div class="rounded-xl border border-slate-100 bg-white/70 p-3 cursor-pointer hover:bg-white hover:shadow-sm transition" onclick="window.location.href='${link}'">
                 <div class="flex items-center justify-between text-sm font-semibold ${hasIssues ? 'text-rose-600' : 'text-emerald-600'}">
                     <span><i class="fas ${row.icon} mr-2"></i>${row.label}</span>
                     <span>${count}</span>
@@ -306,8 +320,9 @@ function renderAlertCard(alert) {
     const subtitle = alert.alert_type === 'BUDGET_VARIANCE'
         ? `${alert.drop_name || 'Drop'} • ${alert.category_group || 'Group'}`
         : (alert.document_id ? `Document #${String(alert.document_id).padStart(4, '0')}` : '');
+    const link = getAlertLink(alert);
     return `
-        <div class="rounded-xl border ${severityClass} p-3">
+        <div class="rounded-xl border ${severityClass} p-3 cursor-pointer hover:opacity-90 hover:shadow-sm transition" onclick="window.location.href='${link}'">
             <div class="flex items-center justify-between text-sm font-semibold">
                 <span><i class="fas fa-circle-info mr-2"></i>${label}</span>
                 <span>${alert.severity === 'critical' ? 'Critical' : 'Review'}</span>

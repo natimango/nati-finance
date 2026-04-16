@@ -1721,11 +1721,37 @@ function actionDownload(documentId) {
     return downloadDocument(documentId);
 }
 
+function applyUrlParams() {
+    const params = new URLSearchParams(window.location.search);
+    let needsFilter = false;
+
+    const status = params.get('status');
+    if (status) {
+        const el = document.getElementById('filter-status');
+        if (el) { el.value = status; needsFilter = true; }
+    }
+
+    const verification = params.get('verification');
+    if (verification) {
+        verificationFilter = verification;
+        renderVerificationFilters();
+        needsFilter = true;
+    }
+
+    const search = params.get('search');
+    if (search) {
+        const el = document.getElementById('search-box');
+        if (el) { el.value = search; needsFilter = true; }
+    }
+
+    if (needsFilter) filterDocuments();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     if (window.sessionReady) {
-        window.sessionReady.then(() => loadDocuments()).catch(() => {});
+        window.sessionReady.then(() => loadDocuments().then(applyUrlParams)).catch(() => {});
     } else {
-        loadDocuments();
+        loadDocuments().then(applyUrlParams);
     }
     if (bus && bus.subscribe) {
         bus.subscribe(bus.EVENTS.DATA_CHANGED, () => loadDocuments());
