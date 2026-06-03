@@ -256,8 +256,30 @@ The compose file already mounts `uploads` and uses `.env.docker`. Adjust secrets
 
 ---
 
+## Nginx Setup (Reverse Proxy)
+
+The app runs on port 3000 inside Docker. Nginx must proxy traffic from the public domain to it.
+
+A ready-to-use config is at `nginx/accounts.nati.co.in.conf`. Deploy it like this:
+
+```bash
+# Copy config
+sudo cp nginx/accounts.nati.co.in.conf /etc/nginx/sites-available/accounts.nati.co.in
+sudo ln -s /etc/nginx/sites-available/accounts.nati.co.in /etc/nginx/sites-enabled/
+
+# Issue SSL cert (first time only)
+sudo certbot --nginx -d accounts.nati.co.in
+
+# Reload nginx
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+---
+
 ## Troubleshooting
 
+- **"Unable to login right now" on the login page**: the Nginx reverse proxy is not forwarding API requests to the app. Run `docker ps` on the server to confirm the app container is running, then check `sudo nginx -t` and confirm the site config is enabled. Also verify the SSL cert exists at `/etc/letsencrypt/live/accounts.nati.co.in/`.
+- **App container not starting**: run `docker compose logs app` for errors. Common causes are a missing `.env.docker` file or wrong `DATABASE_URL`.
 - **AI skipped / throttled**: check `MAX_AI_CALLS_PER_MIN`, `MAX_AI_OCR_LENGTH`, and logs. Heuristic fallback kicks in automatically.
 - **Verification stuck in `processing`**: ensure `raw_text` exists (OCR version matches, hashes align). You can trigger `/api/upload/documents/reprocess` for the document scope.
 - **Manual overrides overwritten**: confirm `bill_date_locked` / `total_locked` in the DB, or set locks by editing the document manually. Locked fields are never overwritten by AI.
