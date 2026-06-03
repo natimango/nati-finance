@@ -221,7 +221,7 @@ Repeat per migration file.
 
 ## Production Deployment (Docker Host)
 
-Typical deploy on a droplet (e.g., `accounts.natiwear.in`):
+Typical deploy on a droplet (e.g., `accounts.nati.co.in`):
 
 ```bash
 ssh root@<droplet-ip>
